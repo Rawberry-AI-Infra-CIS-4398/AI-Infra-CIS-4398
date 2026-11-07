@@ -68,8 +68,8 @@ def test_upload_schema_marks_array_items_as_binary_files():
     assert files["items"]["format"] == "binary"
 
 
-@pytest.mark.parametrize('missing_version', [None, '005_conversation_descriptions', '006_chat_domains'])
-def test_readiness_requires_description_and_domain_migrations(missing_version):
+@pytest.mark.parametrize('missing_version', [None, 'baseline_001'])
+def test_readiness_requires_baseline_schema(missing_version):
     from contextlib import contextmanager
     from unittest.mock import MagicMock
 
@@ -94,4 +94,4 @@ def test_readiness_requires_description_and_domain_migrations(missing_version):
             repository.check_ready()
     else:
         repository.check_ready()
-        assert connection.execute.call_count == 2
+        assert connection.execute.call_count == 1
