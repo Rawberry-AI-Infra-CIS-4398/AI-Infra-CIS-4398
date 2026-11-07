@@ -15,7 +15,7 @@ from app.ingestion import (ALLOWED_EXTENSIONS, MAX_FILE_SIZE_BYTES, InvalidFileC
 from app.postgres_repository import PostgresRepository
 from app.user_models import DocumentRecord
 
-# same owner rule as the user_id CHECK constraint in migration 002
+# same owner rule as the user_id CHECK constraint in rawberry-db/init/schema.sql
 USER_ID_PATTERN = re.compile(r"^[!-~]{1,128}$")
 
 

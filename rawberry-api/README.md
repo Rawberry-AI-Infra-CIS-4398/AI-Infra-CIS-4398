@@ -132,9 +132,8 @@ is not overwritten by later turns. Failed turns do not create descriptions. Exis
 conversations with null descriptions receive one on their next successful exchange;
 there is no bulk backfill. Titles remain caller-supplied.
 
-Apply migration `005_conversation_descriptions.sql` after 004 before starting this
-API version. PostgreSQL startup requires migration 006 (see developer setup below). The migration adds a nullable
-column and length constraint without changing existing conversation content.
+Descriptions are stored in the nullable `chat_session.description` column, limited
+to 300 characters.
 
 Conversations expire after **24 hours of inactivity**, measured from the last
 turn start or completion. Reading/listing history does not extend the lifetime.
@@ -143,8 +142,7 @@ Expired conversations disappear from listings and history/chat requests return
 be revived; create a new conversation instead. Active chats can last more than a
 day: this is an inactivity policy, not a fixed lifetime from creation.
 
-Physical deletion is a separate scheduled operation. Apply migration
-`004_conversation_retention.sql` for its cleanup index, then run from `rawberry-api`:
+Physical deletion is a separate scheduled operation. Run from `rawberry-api`:
 
 ```powershell
 python -B -m app.cleanup_conversations --batch-size 500
@@ -225,14 +223,6 @@ dimension are preserved and excluded; chunks without embeddings are not searched
 A positive similarity is a ranking signal, not a guarantee that a passage answers
 the question. An ANN index and relevance-threshold tuning are deferred.
 
-Apply migration `003_vector_embeddings.sql` after migrations 001 and 002 before
-starting the updated API. It adds an ID sequence for new embedding rows without
-replacing existing data. Apply migrations 004 and 005 next for retention and
-conversation descriptions; current startup requires migration 005.
-Coordinate execution on the shared Cloud SQL database with the database owner.
-Old TXT uploads remain stored; re-upload their original files to create searchable
-vectors. There is no automatic historical backfill in this sprint.
-
 Configure `DATABASE_URL`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION` for
 Cloud SQL and Vertex AI. Use Application Default Credentials locally or the Cloud
 Run service account in deployment, with Vertex AI permission. Cloud SQL connection
@@ -299,12 +289,8 @@ ingestion job. Send it in `X-Developer-Key` on uploads. Missing server configura
 disables uploads with 503; missing or invalid credentials return 403. Use HTTPS
 and keep this secret out of browser code. No user header is required for uploads.
 
-Apply `../rawberry-db/migrations/006_chat_domains.sql` after migration 005 before
-starting the updated API with PostgreSQL. Existing conversations default to education.
-Existing personal documents remain stored but no longer participate in chat retrieval;
-developers must upload reviewed sources to the appropriate shared corpus. Review or
-retire existing conversation histories before launch if they contain personal sources.
-The application does not apply migrations automatically.
+Each conversation has a fixed `domain` (`medical` or `education`). Create the
+database from `rawberry-db/init/schema.sql`; the application never changes the schema.
 
 Create one conversation per desired preset with `domain: "medical"` or
 `domain: "education"`, then use the same `/chat` or `/chat/stream` endpoint.

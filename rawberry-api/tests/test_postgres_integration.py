@@ -35,42 +35,12 @@ def database_url(monkeypatch):
     root = Path(__file__).resolve().parents[2] / "rawberry-db"
     schema = "test_rawberry_" + uuid4().hex
     with psycopg.connect(base_url, autocommit=True) as admin:
-        admin.execute((root / "init/01_extensions.sql").read_text())
+        admin.execute("CREATE EXTENSION IF NOT EXISTS vector")
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     url = make_conninfo(base_url, options=f"-c search_path={schema},public")
     try:
         with psycopg.connect(url, autocommit=True) as connection:
-            connection.execute((root / "init/02_schema.sql").read_text())
-            # Existing records must survive migration, with generated IDs avoiding collisions.
-            connection.execute("INSERT INTO status VALUES (1, 'legacy')")
-            connection.execute(
-                "INSERT INTO document(id, user_id, status_id, created_at) VALUES (100, 42, 1, CURRENT_DATE)"
-            )
-            connection.execute(
-                "INSERT INTO chunk(id, doc_id, chunk_index, content, created_at) "
-                "VALUES (200, 100, 0, 'legacy content', CURRENT_DATE)"
-            )
-            migration = (root / "migrations/001_api_persistence.sql").read_text()
-            connection.execute(migration)
-            connection.execute(migration)
-            assert connection.execute("SELECT content FROM chunk WHERE id = 200").fetchone()[0] == "legacy content"
-            connection.execute("INSERT INTO user_preference VALUES (42, 'legacy preference')")
-            connection.execute("INSERT INTO ingested_item(public_id, user_id, content) VALUES (%s, 42, 'legacy item')", (str(uuid4()),))
-            scoped_migration = (root / "migrations/002_user_scoping_conversations.sql").read_text()
-            connection.execute(scoped_migration)
-            connection.execute(scoped_migration)
-            vector_migration = (root / 'migrations/003_vector_embeddings.sql').read_text()
-            connection.execute(vector_migration)
-            connection.execute(vector_migration)
-            retention_migration = (root / 'migrations/004_conversation_retention.sql').read_text()
-            connection.execute(retention_migration)
-            connection.execute(retention_migration)
-            description_migration = (root / 'migrations/005_conversation_descriptions.sql').read_text()
-            connection.execute(description_migration)
-            connection.execute(description_migration)
-            domain_migration = (root / 'migrations/006_chat_domains.sql').read_text()
-            connection.execute(domain_migration)
-            connection.execute(domain_migration)
+            connection.execute((root / "init/schema.sql").read_text())
         yield url
     finally:
         with psycopg.connect(base_url, autocommit=True) as admin:
@@ -218,9 +188,6 @@ def test_pgvector_persists_ranks_and_filters_owners_and_models(database_url):
 
     with psycopg.connect(database_url) as connection:
         assert connection.execute('SELECT DISTINCT vector_dims(vector) FROM embedding').fetchall() == [(768,)]
-        connection.execute('UPDATE embedding SET vector = %s::vector WHERE chunk_id = '
-                           '(SELECT c.id FROM chunk c JOIN document d ON d.id = c.doc_id WHERE d.public_id::text = %s)',
-                           ('[1,0]', exact))
         connection.execute('UPDATE embedding SET model = %s WHERE model = %s AND vector_dims(vector) = 768',
                            ('another-model', EMBEDDING_MODEL))
     assert restarted.search_chunks('alice', 'question') == []
@@ -236,17 +203,6 @@ def test_embedding_failure_writes_no_documents(database_url):
     with pytest.raises(StorageError, match='Embedding generation failed'):
         repository.save_documents('alice', [(document, b'alpha', [{'chunk_index': 0, 'text': 'alpha'}])])
     assert repository.list_documents('alice') == []
-
-
-def test_legacy_ownership_is_quarantined(database_url):
-    import psycopg
-    repository = PostgresRepository(database_url)
-    assert repository.list_documents('42') == []
-    assert repository.get_system_prompt('42') == ''
-    with psycopg.connect(database_url) as connection:
-        assert connection.execute('SELECT legacy_user_id, user_id FROM document WHERE id = 100').fetchone() == (42, None)
-        assert connection.execute('SELECT count(*) FROM ingested_item').fetchone()[0] == 1  # Legacy text is retained, not exposed.
-        assert connection.execute('SELECT system_prompt FROM legacy_user_preference WHERE user_id = 42').fetchone()[0] == 'legacy preference'
 
 
 def test_postgres_serializes_conversation_turns_and_recovers_abandoned_work(database_url):
@@ -382,19 +338,3 @@ def test_query_embedding_failure_records_failed_turn_without_generation(database
         history = client.get(f'/conversations/{identifier}/messages').json()
         assert len(history) == 1 and history[0]['status'] == 'failed'
     llm.generate_reply.assert_not_called()
-
-
-def test_embedding_migration_preserves_existing_rows_and_avoids_id_collisions(database_url):
-    import psycopg
-
-    migration = Path(__file__).resolve().parents[2] / 'rawberry-db/migrations/003_vector_embeddings.sql'
-    with psycopg.connect(database_url, autocommit=True) as connection:
-        connection.execute("INSERT INTO embedding(id, chunk_id, vector, model, created_at) "
-                           "VALUES (1000, 200, '[1,0]', 'legacy-model', CURRENT_DATE)")
-        connection.execute(migration.read_text())
-        assert connection.execute('SELECT vector::text, model FROM embedding WHERE id = 1000').fetchone() == ('[1,0]', 'legacy-model')
-    store = PostgresRepository(database_url)
-    document = {'id': str(uuid4()), 'filename': 'new.txt', 'file_type': '.txt', 'size_bytes': 5}
-    store.save_documents('alice', [(document, b'alpha', [{'chunk_index': 0, 'text': 'alpha'}])])
-    with psycopg.connect(database_url) as connection:
-        assert connection.execute('SELECT MAX(id) FROM embedding').fetchone()[0] > 1000
