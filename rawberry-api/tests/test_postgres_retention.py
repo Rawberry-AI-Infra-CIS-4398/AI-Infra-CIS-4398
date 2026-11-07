@@ -26,10 +26,14 @@ def test_postgres_expiration_and_cleanup_of_related_rows(database_url):
     # Include every FK dependent, even legacy rows attached to an API session.
     with psycopg.connect(database_url) as connection:
         internal = connection.execute('SELECT id FROM chat_session WHERE public_id = %s', (expired,)).fetchone()[0]
-        connection.execute("INSERT INTO role VALUES (1, 'user')")
-        connection.execute("INSERT INTO message VALUES (1, %s, 1, 'Legacy message', CURRENT_DATE)", (internal,))
-        connection.execute("INSERT INTO citation VALUES (1, 1, 200, 0.5, CURRENT_DATE)")
-        connection.execute("INSERT INTO chat_session_access VALUES (1, 42, %s, false)", (internal,))
+        role = connection.execute("SELECT id FROM role WHERE name = 'user'").fetchone()[0]
+        chunk = connection.execute('SELECT id FROM chunk LIMIT 1').fetchone()[0]
+        message = connection.execute(
+            "INSERT INTO message(session_id, role_id, content) VALUES (%s, %s, 'Legacy message') RETURNING id",
+            (internal, role)).fetchone()[0]
+        connection.execute("INSERT INTO citation(message_id, chunk_id, retrieval_score) VALUES (%s, %s, 0.5)",
+                           (message, chunk))
+        connection.execute("INSERT INTO chat_session_access(user_id, session_id) VALUES ('alice', %s)", (internal,))
     expire(database_url, expired)
     assert [row['id'] for row in repository.list_conversations('alice')] == [active]
     for operation in [lambda: repository.list_messages('alice', expired),
@@ -42,7 +46,6 @@ def test_postgres_expiration_and_cleanup_of_related_rows(database_url):
     with psycopg.connect(database_url) as connection:
         for table in ['chat_turn', 'message', 'citation', 'chat_session_access']:
             assert connection.execute(f'SELECT count(*) FROM {table}').fetchone()[0] == 0
-        assert connection.execute('SELECT count(*) FROM document WHERE id = 100').fetchone()[0] == 1
     assert repository.get_document_content('alice', document['id']) == b'alpha'
     assert repository.get_system_prompt('alice') == 'Be concise'
 

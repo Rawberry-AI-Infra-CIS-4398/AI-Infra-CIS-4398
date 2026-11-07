@@ -1,7 +1,7 @@
 """PostgreSQL persistence behind the API storage boundary.
 
 Connections are scoped to an operation; uploads use one transaction for the batch.
-No DDL is run by the application. Apply the versioned migration before startup.
+No DDL is run by the application. Create the database from rawberry-db/init/schema.sql before startup.
 """
 
 from contextlib import contextmanager
@@ -20,6 +20,7 @@ from app.retrieval.embeddings import (
     VertexEmbeddingProvider,
     validate_embedding,
 )
+REQUIRED_SCHEMA_VERSION = 'baseline_001'
 
 
 class PostgresRepository:
@@ -50,13 +51,12 @@ class PostgresRepository:
 
     def check_ready(self) -> None:
         with self._connection() as connection:
-            for version in ('005_conversation_descriptions', '006_chat_domains'):
-                row = connection.execute(
-                    "SELECT version FROM schema_migration WHERE version = %s",
-                    (version,),
-                ).fetchone()
-                if row is None:
-                    raise StorageError("Required database migration is missing")
+            row = connection.execute(
+                "SELECT 1 FROM schema_migration WHERE version = %s",
+                (REQUIRED_SCHEMA_VERSION,),
+            ).fetchone()
+            if row is None:
+                raise StorageError("Required database migration is missing")
 
 
     def save_documents(self, user_id: str, documents: list[tuple[dict[str, Any], bytes, list[dict[str, Any]]]]) -> list[str]:
