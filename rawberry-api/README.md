@@ -33,7 +33,7 @@ returns the same 404 as a nonexistent conversation. Uploads require a separate d
 - Independent conversations with ordered user/assistant history and generation states.
 - SSE chat lifecycle events; generated tokens are not streamed individually.
 
-DOCX text extraction, OCR for scanned PDFs and citations remain future work. Documents enter the RAG pipeline only through developer-only `POST /uploadmedical` and `POST /uploadedu`; pasted-text
+DOCX text extraction, OCR for scanned PDFs, citations, and sharing remain future work. Documents enter the RAG pipeline only through developer-only `POST /uploadmedical` and `POST /uploadedu`; pasted-text
 submission is not supported. Chat messages remain part of conversation history.
 
 ## Run locally
