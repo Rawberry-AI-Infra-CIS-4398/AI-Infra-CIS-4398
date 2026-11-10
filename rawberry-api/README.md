@@ -5,7 +5,7 @@ Authentication and account management belong to the upstream application.
 
 ## Authentication boundary and user context
 
-Every data endpoint requires one `X-User-ID` header supplied by the trusted upstream
+Every user data endpoint requires one `X-User-ID` header supplied by the trusted upstream
 backend or gateway. IDs are opaque, case-sensitive strings of 1-128 printable ASCII
 characters without spaces. `42`, `042`, `Alice`, and `alice` are distinct users.
 This provisional format must be confirmed with the upstream team before integration.
@@ -16,10 +16,9 @@ access to RAWBerry. This backend does not provide login, registration, password
 storage, or account sessions. Local Swagger testing lets you manually enter an ID;
 that is a development convenience, not proof of identity.
 
-RAWBerry uses this user context to scope documents, preferences,
-retrieved chunks and conversations. Another user's conversation
-returns the same 404 as a nonexistent conversation. Anonymous uploads and sharing
-are not supported. `/` and `/health` do not require user context.
+RAWBerry uses this user context to scope preferences and conversations.
+Documents and retrieved chunks belong to shared medical or education corpora. Another user's conversation
+returns the same 404 as a nonexistent conversation. Uploads require a separate developer API key; end users cannot upload. `/` and `/health` do not require user context.
 
 ## Current implementation
 
@@ -30,11 +29,11 @@ are not supported. `/` and `/health` do not require user context.
   with persisted Vertex AI embeddings and owner-filtered pgvector search in PostgreSQL mode.
 - Deterministic hash-vector retrieval in the isolated in-memory development mode.
 - Optional Vertex AI Gemini generation, or mock responses for local development.
-- Per-user response preferences.
+- Per-user response preferences passed through Gemini's dedicated `system_instruction` configuration.
 - Independent conversations with ordered user/assistant history and generation states.
 - SSE chat lifecycle events; generated tokens are not streamed individually.
 
-OCR for scanned PDFs, citations, and sharing remain future work. Documents enter the RAG pipeline only through `/upload`; pasted-text
+DOCX text extraction, OCR for scanned PDFs and citations remain future work. Documents enter the RAG pipeline only through developer-only `POST /uploadmedical` and `POST /uploadedu`; pasted-text
 submission is not supported. Chat messages remain part of conversation history.
 
 ## Run locally
@@ -46,7 +45,7 @@ python -m uvicorn app.main:app --reload
 ```
 
 Swagger: <http://127.0.0.1:8000/docs>. Expand an endpoint, click **Try it out**, and
-enter `X-User-ID` (for example, `alice`). Use the file picker for `/upload`.
+enter `X-User-ID` (for example, `alice`). Developers use the file picker on either upload endpoint and supply `X-Developer-Key`.
 
 Without `DATABASE_URL`, all content and conversations disappear when the API
 process restarts and are not shared across processes. See the
@@ -59,15 +58,17 @@ This branch intentionally changes the prototype's user/session contract. Identit
 comes only from `X-User-ID`; JSON/form/query `userid`, `user_id`, and `owner_id` are
 not alternative identity sources. Request models reject extra fields; uploads reject
 legacy identity form fields. The old `/users/{userid}/system-prompt` route is removed.
-`data.window` and `data.agent` are removed from chat requests; specialized assistant
-selection is not implemented.
+`data.window` and `data.agent` are removed from chat requests. Select `domain`
+when creating a conversation; that choice stays fixed for its lifetime.
 
 | Endpoint | Behavior |
 | --- | --- |
 | `GET /` | Status and endpoint listing; no user header required |
 | `GET /health` | Process liveness; no user header required |
-| `POST /upload` | Upload multipart `files`; ownership comes from the header |
-| `GET /documents` | List only the current user's uploaded document metadata |
+| `POST /uploadmedical` | Developer-only upload of medical multipart `files` |
+| `POST /uploadedu` | Developer-only upload of education multipart `files` |
+| `GET /uploadmedical` | List shared medical document metadata; requires user header |
+| `GET /uploadedu` | List shared education document metadata; requires user header |
 | `GET /me/system-prompt` | Read the current user's preferences |
 | `PUT /me/system-prompt` | Update preferences; empty prompt clears them |
 | `POST /conversations` | Create an independent conversation |
@@ -75,11 +76,15 @@ selection is not implemented.
 | `GET /conversations/{conversation_id}/messages` | Read owned conversation history |
 | `POST /chat` | Generate and store a turn in an owned conversation |
 | `POST /chat/stream` | Same chat behavior with SSE lifecycle events |
+| `PUT /conversations/{conversation_id}/shares` | Replace the list of users an owned conversation is shared with |
+| `GET /conversations/{conversation_id}/shares` | List who an owned conversation is shared with |
+| `GET /shared` | List conversations other users have shared with the current user |
+| `GET /shared/{conversation_id}` | Read a shared conversation and its messages (read-only) |
 
 Create a conversation with `POST /conversations`:
 
 ```json
-{"title": "Research questions"}
+{"title": "Research questions", "domain": "education"}
 ```
 
 Use its returned `id` as `conversation_id` in either chat endpoint:
@@ -87,25 +92,28 @@ Use its returned `id` as `conversation_id` in either chat endpoint:
 ```json
 {
   "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
-  "message": "What does my document say?"
+  "message": "What do the education sources say?"
 }
 ```
 
 The response includes `conversation_id`, `turn_id`, and `reply`. Update preferences
 with `{"prompt": "Keep answers concise."}`.
 
+Preferences are loaded for each turn and sent separately from the user message,
+retrieved document context, and conversation history. Updates apply to subsequent
+turns in existing and new chats; an empty preference clears the system instruction.
+Mock mode accepts the same configuration but only echoes message content and does
+not simulate tone or length preferences. No schema migration is needed.
+
 ## Document-only RAG input
 
-Use `POST /upload` to submit one or more document files, and `GET /documents` to
-list your uploaded document metadata. TXT, PDF, and DOCX files produce searchable
-chunks of up to 900 characters, split on paragraph/sentence/word boundaries with 100
-characters of overlap. PDF chunks keep their 1-based page number; DOCX has no pages,
-and its paragraphs and table rows are read in document order (headers, footers, and
-images are skipped). PDFs without a text layer (scans) are stored with no chunks. A
-damaged PDF or DOCX, or a password-protected PDF, is rejected with `UNREADABLE_FILE`.
-Password-protected DOCX files are not ZIP archives, so they fail the signature check
-with `INVALID_FILE_CONTENT`.
-Uploaded content is scoped to `X-User-ID`.
+Developers use `POST /uploadmedical` or `POST /uploadedu` to submit source files.
+Users can list the matching corpus metadata with GET on the same paths. TXT and PDF files produce searchable chunks
+of up to 900 characters, split on paragraph/sentence/word boundaries with 100
+characters of overlap. PDF chunks keep their 1-based page number. PDFs without a
+text layer (scans) and DOCX files are stored with no chunks. A PDF that cannot be
+parsed (damaged or password-protected) is rejected with `UNREADABLE_FILE`.
+Uploaded content is scoped to the medical or education corpus, independently of user identity.
 
 `POST /ingest` and `GET /get` have been removed and return 404. Chat responses no
 longer include `recent_items`. Existing pasted-text database rows are retained as
@@ -117,6 +125,49 @@ A user's chat questions and assistant replies are recorded through `/chat` or
 uploaded source documents.
 
 ## Conversation behavior
+
+Conversation creation/listing responses include a nullable `description` (maximum
+300 characters). New conversations have `description: null`. The first successful
+exchange automatically saves compact question and answer excerpts, with whitespace
+normalized and long text shortened at word boundaries. This is an extractive
+preview, not an additional AI-generated summary, and makes no extra model request.
+It is saved atomically with the completed turn, works for both chat endpoints, and
+is not overwritten by later turns. Failed turns do not create descriptions. Existing
+conversations with null descriptions receive one on their next successful exchange;
+there is no bulk backfill. Titles remain caller-supplied.
+
+Descriptions are stored in the nullable `chat_session.description` column, limited
+to 300 characters.
+
+Conversations expire after **24 hours of inactivity**, measured from the last
+turn start or completion. Reading/listing history does not extend the lifetime.
+Expired conversations disappear from listings and history/chat requests return
+404, including streaming requests before the stream starts. An expired chat cannot
+be revived; create a new conversation instead. Active chats can last more than a
+day: this is an inactivity policy, not a fixed lifetime from creation.
+
+Physical deletion is a separate scheduled operation. Run from `rawberry-api`:
+
+```powershell
+python -B -m app.cleanup_conversations --batch-size 500
+```
+
+The command requires `DATABASE_URL`, deletes at most 500 expired conversations per
+invocation (configurable), and reports a JSON count. Schedule it every 15 minutes;
+increase frequency/batch size if the expiration backlog exceeds that capacity.
+Until cleanup runs, expired data remains stored but inaccessible through the API.
+The command deletes related turns, legacy messages/citations, and access rows in
+one transaction. It preserves uploaded documents, embeddings, and user preferences.
+Legacy sessions without public API IDs are excluded. Recent pending generations
+are protected for the existing five-minute timeout; stale pending turns do not
+block deletion indefinitely. Concurrent cleanup workers skip locked conversations.
+
+For GCP, package this command as the Cloud Run Job command/arguments using the API
+image and the same database connectivity/secrets as the API. Configure the scheduler
+and job in deployment infrastructure; this change does not provision cloud resources
+or install a schedule automatically. In-memory development storage enforces the same
+expiration checks and offers `purge_expired_conversations()` for local cleanup; the
+scheduled command intentionally refuses to fall back to in-memory storage.
 
 Each conversation has independent history, but may retrieve from **all documents
 owned by its user**, including documents uploaded after the conversation was created.
@@ -137,6 +188,37 @@ SSE uses the `status` event with one `request_id`: `received`, `generating`, the
 `completed` or `failed`. Ownership and busy checks run before the stream starts.
 Disconnecting does not guarantee cancellation of the worker; pending work can finish
 or be recovered through the timeout rule. This is lifecycle reporting, not token streaming.
+
+## Shared conversations
+
+Owners share a conversation read-only with specific users. `PUT
+/conversations/{conversation_id}/shares` replaces the full recipient list, so it both
+shares and revokes; `{"user_ids": []}` revokes everyone. Recipient IDs use the same
+format as `X-User-ID`, at most 50 per request, and owners cannot list themselves (422).
+
+```json
+{"user_ids": ["bob", "carol"]}
+```
+
+Recipients find shared conversations with `GET /shared` and read one with `GET
+/shared/{conversation_id}`, which returns `{"conversation": {...}, "messages": [...]}`
+in the same message format as the owner's history. Sharing grants no write access:
+recipients still receive 404 from `/chat`, `/chat/stream`,
+`/conversations/{conversation_id}/messages`, and the share list. Never shared,
+revoked, and expired conversations all return the same 404. Shares end when the
+conversation expires and are deleted with it.
+
+Shares are stored in `chat_session_access`, one row per recipient per conversation;
+revoking sets `is_deleted` and sharing again restores the same row. Sharing is by
+user ID only. Link-based sharing would need a token column added to `schema.sql`.
+
+### Refreshing shared views
+
+The API does not push updates. Clients poll `GET /shared/{conversation_id}` every 15
+seconds (FR-06 allows 10-30) and re-render only when `conversation.updated_at` changes;
+it advances when a turn starts and when it finishes. An in-progress question appears
+with `status: "pending"` and its answer arrives on a later poll. Each poll is two
+indexed queries, so no caching is needed at this interval.
 
 ## Errors and verification
 
@@ -176,13 +258,6 @@ dimension are preserved and excluded; chunks without embeddings are not searched
 A positive similarity is a ranking signal, not a guarantee that a passage answers
 the question. An ANN index and relevance-threshold tuning are deferred.
 
-Apply migration `003_vector_embeddings.sql` after migrations 001 and 002 before
-starting the updated API. It adds an ID sequence for new embedding rows without
-replacing existing data. Startup refuses a configured database missing this migration.
-Coordinate execution on the shared Cloud SQL database with the database owner.
-Old TXT uploads remain stored; re-upload their original files to create searchable
-vectors. There is no automatic historical backfill in this sprint.
-
 Configure `DATABASE_URL`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION` for
 Cloud SQL and Vertex AI. Use Application Default Credentials locally or the Cloud
 Run service account in deployment, with Vertex AI permission. Cloud SQL connection
@@ -219,3 +294,49 @@ The GitHub Actions test workflow exercises both suites with a disposable pgvecto
 service and mocked model calls. Local PostgreSQL tests remain opt-in through
 `TEST_DATABASE_URL`. Configure the workflow as a required branch-protection check
 if the team wants failed tests to block merges.
+
+## Retrieval invocation checks (T1AI-49)
+
+With a disposable pgvector database in `TEST_DATABASE_URL`, run both suites from
+the repository root. The PostgreSQL integration tests upload TXT sources, recreate
+the application, and invoke both `/chat` and `/chat/stream`. The SDK is replaced
+with controlled responses, so the tests prove request wiring and database behavior
+without incurring Google charges or judging model answer quality.
+
+The invocation tests check that only the question is embedded after restart,
+selected source passages reach `gemini-2.5-flash`, other users' passages and unrelated
+passages are excluded, and embedding failures leave a failed conversation turn
+without calling the answer model. No-match behavior preserves the existing API:
+the model receives the question and any allowed conversation history/preferences,
+without retrieved document context. It is not forced to abstain or return citations.
+
+For a live team demo after database/Vertex configuration, upload a UTF-8 `.txt`
+file through Swagger with the trusted development user header, confirm its
+`embedding_status` is `completed`, create a conversation, then ask a question about
+that file using the returned conversation ID. Use `USE_MOCK_CHAT=false` for a real
+Gemini answer. PDF/DOCX extraction, historical backfill, and real-model retrieval
+quality evaluation are outside these tests.
+
+## Developer-managed preset chats
+
+Set `DEVELOPER_UPLOAD_API_KEY` to a secret available only to developers or the
+ingestion job. Send it in `X-Developer-Key` on uploads. Missing server configuration
+disables uploads with 503; missing or invalid credentials return 403. Use HTTPS
+and keep this secret out of browser code. No user header is required for uploads.
+
+Each conversation has a fixed `domain` (`medical` or `education`). Create the
+database from `rawberry-db/init/schema.sql`; the application never changes the schema.
+
+Create one conversation per desired preset with `domain: "medical"` or
+`domain: "education"`, then use the same `/chat` or `/chat/stream` endpoint.
+The server retrieves only from that conversation's corpus. Users share sources,
+while their preferences and conversation histories stay private. Domain cannot be
+changed by a chat request; create a new conversation to switch modes.
+
+The shared corpora reuse repository owner filtering with reserved owners
+`corpus:medical` and `corpus:education`; these cannot be used as user identities.
+This works with both in-memory and PostgreSQL storage without duplicating the RAG
+pipeline. Uploading again adds documents; this API does not yet replace or version
+an existing corpus. In-memory uploads disappear at restart; production presets
+require PostgreSQL.
+

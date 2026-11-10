@@ -18,7 +18,7 @@ from app.retrieval.embeddings import HashEmbeddingProvider
 from pdf_samples import make_pdf
 from test_api import exercise_isolation
 
-SCANNED_PDF = make_pdf('')  # valid PDF with no text layer
+TEXT_PDF = make_pdf('gamma from PDF')
 
 
 @pytest.fixture
@@ -35,33 +35,12 @@ def database_url(monkeypatch):
     root = Path(__file__).resolve().parents[2] / "rawberry-db"
     schema = "test_rawberry_" + uuid4().hex
     with psycopg.connect(base_url, autocommit=True) as admin:
-        admin.execute((root / "init/01_extensions.sql").read_text())
+        admin.execute("CREATE EXTENSION IF NOT EXISTS vector")
         admin.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
     url = make_conninfo(base_url, options=f"-c search_path={schema},public")
     try:
         with psycopg.connect(url, autocommit=True) as connection:
-            connection.execute((root / "init/02_schema.sql").read_text())
-            # Existing records must survive migration, with generated IDs avoiding collisions.
-            connection.execute("INSERT INTO status VALUES (1, 'legacy')")
-            connection.execute(
-                "INSERT INTO document(id, user_id, status_id, created_at) VALUES (100, 42, 1, CURRENT_DATE)"
-            )
-            connection.execute(
-                "INSERT INTO chunk(id, doc_id, chunk_index, content, created_at) "
-                "VALUES (200, 100, 0, 'legacy content', CURRENT_DATE)"
-            )
-            migration = (root / "migrations/001_api_persistence.sql").read_text()
-            connection.execute(migration)
-            connection.execute(migration)
-            assert connection.execute("SELECT content FROM chunk WHERE id = 200").fetchone()[0] == "legacy content"
-            connection.execute("INSERT INTO user_preference VALUES (42, 'legacy preference')")
-            connection.execute("INSERT INTO ingested_item(public_id, user_id, content) VALUES (%s, 42, 'legacy item')", (str(uuid4()),))
-            scoped_migration = (root / "migrations/002_user_scoping_conversations.sql").read_text()
-            connection.execute(scoped_migration)
-            connection.execute(scoped_migration)
-            vector_migration = (root / 'migrations/003_vector_embeddings.sql').read_text()
-            connection.execute(vector_migration)
-            connection.execute(vector_migration)
+            connection.execute((root / "init/schema.sql").read_text())
         yield url
     finally:
         with psycopg.connect(base_url, autocommit=True) as admin:
@@ -71,30 +50,30 @@ def database_url(monkeypatch):
 def test_data_survives_application_recreation_and_is_shared(database_url, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("USE_MOCK_CHAT", "true")
-    with TestClient(create_app(), headers={'X-User-ID': 'alice'}) as first:
-        uploaded = first.post("/upload", files=[
+    with TestClient(create_app(), headers={'X-User-ID': 'alice', 'X-Developer-Key': 'test-upload-key'}) as first:
+        uploaded = first.post("/uploadedu", headers={'X-Developer-Key': 'test-upload-key'}, files=[
             ("files", ("notes.txt", b"alpha beta gamma", "text/plain")),
-            ("files", ("paper.pdf", SCANNED_PDF, "application/pdf")),
+            ("files", ("paper.pdf", TEXT_PDF, "application/pdf")),
         ])
         assert uploaded.status_code == 200
-        assert [d['embedding_status'] for d in uploaded.json()] == ['completed', 'pending']
+        assert [d['embedding_status'] for d in uploaded.json()] == ['completed', 'completed']
         assert first.put("/me/system-prompt", json={"prompt": "Be concise"}).status_code == 200
-        with TestClient(create_app(), headers={'X-User-ID': 'alice'}) as second:
-            assert len(second.get("/documents").json()) == 2
+        with TestClient(create_app(), headers={'X-User-ID': 'alice', 'X-Developer-Key': 'test-upload-key'}) as second:
+            assert len(second.get("/uploadedu").json()) == 2
 
     # New app/connection after both previous apps have shut down.
-    with TestClient(create_app(), headers={'X-User-ID': 'alice'}) as restarted:
-        documents = restarted.get("/documents").json()
-        assert [d["chunk_count"] for d in documents] == [1, 0]
+    with TestClient(create_app(), headers={'X-User-ID': 'alice', 'X-Developer-Key': 'test-upload-key'}) as restarted:
+        documents = restarted.get("/uploadedu").json()
+        assert [d["chunk_count"] for d in documents] == [1, 1]
         assert restarted.get("/me/system-prompt").json()["prompt"] == "Be concise"
         assert restarted.get("/me/system-prompt", headers={"X-User-ID": "bob"}).json()["prompt"] == ""
-        conversation_id = restarted.post('/conversations', json={'title': 'Persistent'}).json()['id']
+        conversation_id = restarted.post('/conversations', json={'domain': 'education', 'title': 'Persistent'}).json()['id']
         chat = restarted.post("/chat", json={"conversation_id": conversation_id, "message": "gamma?"})
         assert chat.status_code == 200
         assert "alpha beta gamma" in chat.json()["reply"]
-        assert restarted.app.state.store.get_document_content("alice", documents[1]["id"]) == SCANNED_PDF
+        assert restarted.app.state.store.get_document_content("corpus:education", documents[1]["id"]) == TEXT_PDF
         assert restarted.put("/me/system-prompt", json={"prompt": ""}).status_code == 200
-    with TestClient(create_app(), headers={'X-User-ID': 'alice'}) as final:
+    with TestClient(create_app(), headers={'X-User-ID': 'alice', 'X-Developer-Key': 'test-upload-key'}) as final:
         assert final.get("/me/system-prompt").json()["prompt"] == ""
         history = final.get('/conversations/' + conversation_id + '/messages').json()
         assert [message['role'] for message in history] == ['user', 'assistant']
@@ -125,15 +104,15 @@ def test_failed_batch_rolls_back_documents_bytes_and_chunks(database_url):
 def test_uploaded_pdf_is_embedded_and_answers_chat_with_its_page(database_url):
     repository = PostgresRepository(database_url)
     with TestClient(create_app(store=repository), headers={'X-User-ID': 'alice'}) as client:
-        uploaded = client.post('/upload', files=[
+        uploaded = client.post('/uploadedu', headers={'X-Developer-Key': 'test-upload-key'}, files=[
             ('files', ('paper.pdf', make_pdf('intro page', 'zebra migration patterns'), 'application/pdf')),
         ])
         assert uploaded.status_code == 200
         assert uploaded.json()[0]['embedding_status'] == 'completed'
         assert uploaded.json()[0]['chunk_count'] == 2
-        results = repository.search_chunks('alice', 'zebra migration')
+        results = repository.search_chunks('corpus:education', 'zebra migration')
         assert (results[0]['text'], results[0]['page_number']) == ('zebra migration patterns', 2)
-        conversation_id = client.post('/conversations', json={'title': 'PDF'}).json()['id']
+        conversation_id = client.post('/conversations', json={'domain': 'education', 'title': 'PDF'}).json()['id']
         chat = client.post('/chat', json={'conversation_id': conversation_id, 'message': 'zebra migration?'})
         assert 'zebra migration patterns' in chat.json()['reply']
     assert repository.search_chunks('bob', 'zebra migration') == []
@@ -159,7 +138,7 @@ def test_ingestion_pipeline_indexes_documents_for_search(database_url):
 def test_invalid_api_batch_writes_nothing(database_url):
     repository = PostgresRepository(database_url)
     with TestClient(create_app(store=repository), headers={'X-User-ID': 'alice'}) as client:
-        response = client.post("/upload", files=[
+        response = client.post("/uploadedu", headers={'X-Developer-Key': 'test-upload-key'}, files=[
             ("files", ("notes.txt", b"valid text", "text/plain")),
             ("files", ("invalid.pdf", b"invalid", "application/pdf")),
         ])
@@ -209,9 +188,6 @@ def test_pgvector_persists_ranks_and_filters_owners_and_models(database_url):
 
     with psycopg.connect(database_url) as connection:
         assert connection.execute('SELECT DISTINCT vector_dims(vector) FROM embedding').fetchall() == [(768,)]
-        connection.execute('UPDATE embedding SET vector = %s::vector WHERE chunk_id = '
-                           '(SELECT c.id FROM chunk c JOIN document d ON d.id = c.doc_id WHERE d.public_id::text = %s)',
-                           ('[1,0]', exact))
         connection.execute('UPDATE embedding SET model = %s WHERE model = %s AND vector_dims(vector) = 768',
                            ('another-model', EMBEDDING_MODEL))
     assert restarted.search_chunks('alice', 'question') == []
@@ -227,17 +203,6 @@ def test_embedding_failure_writes_no_documents(database_url):
     with pytest.raises(StorageError, match='Embedding generation failed'):
         repository.save_documents('alice', [(document, b'alpha', [{'chunk_index': 0, 'text': 'alpha'}])])
     assert repository.list_documents('alice') == []
-
-
-def test_legacy_ownership_is_quarantined(database_url):
-    import psycopg
-    repository = PostgresRepository(database_url)
-    assert repository.list_documents('42') == []
-    assert repository.get_system_prompt('42') == ''
-    with psycopg.connect(database_url) as connection:
-        assert connection.execute('SELECT legacy_user_id, user_id FROM document WHERE id = 100').fetchone() == (42, None)
-        assert connection.execute('SELECT count(*) FROM ingested_item').fetchone()[0] == 1  # Legacy text is retained, not exposed.
-        assert connection.execute('SELECT system_prompt FROM legacy_user_preference WHERE user_id = 42').fetchone()[0] == 'legacy preference'
 
 
 def test_postgres_serializes_conversation_turns_and_recovers_abandoned_work(database_url):
@@ -256,3 +221,156 @@ def test_postgres_serializes_conversation_turns_and_recovers_abandoned_work(data
         repository.finish_turn('alice', identifier, first['id'], 'late')
     other_instance.finish_turn('alice', identifier, second['id'], 'success')
     assert [m['status'] for m in repository.list_messages('alice', identifier)] == ['failed', 'completed', 'completed']
+
+
+@pytest.mark.parametrize('endpoint', ['/chat', '/chat/stream'])
+def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_url, monkeypatch, endpoint):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from app.api.routes import get_chat_service
+    from app.config import Settings
+    from app.retrieval.embeddings import VertexEmbeddingProvider
+    from app.services.chat_service import ChatService
+
+    settings = Settings(google_cloud_project='test-project', use_mock_chat=False)
+    sdk_client = MagicMock()
+    sdk_client.__enter__.return_value = sdk_client
+    monkeypatch.setattr('google.genai.Client', MagicMock(return_value=sdk_client))
+    selected = 'The Continental Army prevailed at Yorktown.'
+    irrelevant = 'An apple pie needs flour and butter.'
+    private = 'BOB PRIVATE PAYROLL'
+    question = 'Who won the revolutionary battle?'
+
+    def embed(*, model, contents, config):
+        # Controlled semantic matches: the question and passage share a vector,
+        # while the unrelated passage is orthogonal. No Google calls are made.
+        values = ([0.0, 1.0] if contents == irrelevant else [1.0, 0.0]) + [0.0] * 766
+        return SimpleNamespace(embeddings=[SimpleNamespace(values=values)])
+
+    sdk_client.models.embed_content.side_effect = embed
+    sdk_client.models.generate_content.return_value = SimpleNamespace(text='The Continental Army won.')
+    store = PostgresRepository(database_url, embeddings=VertexEmbeddingProvider(settings))
+    with TestClient(create_app(store=store), headers={'X-User-ID': 'alice'}) as client:
+        for owner, text in [('alice', selected), ('alice', irrelevant), ('bob', private)]:
+            uploaded = client.post('/uploadmedical' if owner == 'bob' else '/uploadedu', headers={'X-Developer-Key': 'test-upload-key'}, files=[
+                ('files', ('notes.txt', text.encode(), 'text/plain')),
+            ])
+            assert uploaded.status_code == 200
+            assert uploaded.json()[0]['embedding_status'] == 'completed'
+
+    # Recreate application/storage to prove generation uses durable vectors.
+    sdk_client.models.embed_content.reset_mock()
+    restarted = PostgresRepository(database_url, embeddings=VertexEmbeddingProvider(settings))
+    app = create_app(store=restarted)
+    app.dependency_overrides[get_chat_service] = lambda: ChatService(restarted, settings=settings)
+    with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
+        identifier = client.post('/conversations', json={'domain': 'education', 'title': 'History'}).json()['id']
+        response = client.post(endpoint, json={'conversation_id': identifier, 'message': question})
+        assert response.status_code == 200
+        if endpoint == '/chat':
+            assert response.json()['reply'] == 'The Continental Army won.'
+        else:
+            assert '"status":"completed"' in response.text
+            assert 'The Continental Army won.' in response.text
+        history = client.get(f'/conversations/{identifier}/messages').json()
+        assert [entry['status'] for entry in history] == ['completed', 'completed']
+
+    sdk_client.models.embed_content.assert_called_once()
+    assert sdk_client.models.embed_content.call_args.kwargs['config']['task_type'] == 'RETRIEVAL_QUERY'
+    generation = sdk_client.models.generate_content.call_args.kwargs
+    assert generation['model'] == 'gemini-2.5-flash'
+    assert selected in generation['contents']
+    assert question in generation['contents']
+    assert irrelevant not in generation['contents']
+    assert private not in generation['contents']
+    sdk_client.models.generate_content.assert_called_once()
+
+
+def test_no_match_does_not_inject_another_users_sources(database_url):
+    from unittest.mock import MagicMock
+
+    from app.api.routes import get_chat_service
+    from app.services.chat_service import ChatService
+
+    store = PostgresRepository(database_url)
+    document = {'id': str(uuid4()), 'filename': 'private.txt', 'file_type': '.txt', 'size_bytes': 32}
+    store.save_documents('bob', [(document, b'BOB CONFIDENTIAL PAYROLL NUMBERS', [
+        {'chunk_index': 0, 'text': 'BOB CONFIDENTIAL PAYROLL NUMBERS'},
+    ])])
+    llm = MagicMock()
+    llm.generate_reply.return_value = 'A response without source context.'
+    app = create_app(store=store)
+    app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
+    with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
+        identifier = client.post('/conversations', json={'domain': 'education'}).json()['id']
+        response = client.post('/chat', json={'conversation_id': identifier, 'message': 'PAYROLL'})
+        assert response.status_code == 200
+        assert response.json()['reply'] == 'A response without source context.'
+    # Preserve the current no-match contract: generation receives the question
+    # without claiming any retrieved evidence; it is not forced to abstain.
+    llm.generate_reply.assert_called_once_with('PAYROLL', system_instruction=None)
+
+
+@pytest.mark.parametrize('endpoint', ['/chat', '/chat/stream'])
+def test_query_embedding_failure_records_failed_turn_without_generation(database_url, endpoint):
+    from unittest.mock import MagicMock
+
+    from app.api.routes import get_chat_service
+    from app.services.chat_service import ChatService
+
+    embeddings = MagicMock()
+    embeddings.embed_query.side_effect = RuntimeError('sensitive provider details')
+    store = PostgresRepository(database_url, embeddings=embeddings)
+    llm = MagicMock()
+    app = create_app(store=store)
+    app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
+    with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
+        identifier = client.post('/conversations', json={'domain': 'education'}).json()['id']
+        response = client.post(endpoint, json={'conversation_id': identifier, 'message': 'question'})
+        if endpoint == '/chat':
+            assert response.status_code == 503
+            assert response.json()['error_code'] == 'STORAGE_UNAVAILABLE'
+        else:
+            assert response.status_code == 200
+            assert '"status":"failed"' in response.text
+        assert 'sensitive provider details' not in response.text
+        history = client.get(f'/conversations/{identifier}/messages').json()
+        assert len(history) == 1 and history[0]['status'] == 'failed'
+    llm.generate_reply.assert_not_called()
+
+
+def test_postgres_sharing_is_read_only_revocable_and_expires(database_url):
+    import psycopg
+
+    store = PostgresRepository(database_url)
+    identifier = store.create_conversation('alice', 'Shared')['id']
+    turn = store.start_turn('alice', identifier, 'What is gamma?')
+    store.finish_turn('alice', identifier, turn['id'], 'Gamma is a letter.')
+
+    assert store.set_conversation_shares('alice', identifier, ['carol', 'bob', 'bob']) == ['bob', 'carol']
+    assert store.list_conversation_shares('alice', identifier) == ['bob', 'carol']
+    assert [c['id'] for c in store.list_shared_conversations('bob')] == [identifier]
+    view = store.get_shared_conversation('bob', identifier)
+    assert view['conversation']['user_id'] == 'alice' and 'session_id' not in view['conversation']
+    assert [m['content'] for m in view['messages']] == ['What is gamma?', 'Gamma is a letter.']
+    with pytest.raises(ResourceNotFound):
+        store.start_turn('bob', identifier, 'Recipients cannot write')
+    with pytest.raises(ResourceNotFound):
+        store.set_conversation_shares('bob', identifier, ['dave'])
+
+    # Revoking flags the row; sharing again restores the same row.
+    assert store.set_conversation_shares('alice', identifier, ['carol']) == ['carol']
+    with pytest.raises(ResourceNotFound):
+        store.get_shared_conversation('bob', identifier)
+    store.set_conversation_shares('alice', identifier, ['bob'])
+    assert store.get_shared_conversation('bob', identifier)['messages']
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM chat_session_access WHERE user_id = 'bob'").fetchone()[0] == 1
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute("UPDATE chat_session SET updated_ts = CURRENT_TIMESTAMP - INTERVAL '25 hours' "
+                           "WHERE public_id = %s", (identifier,))
+    assert store.list_shared_conversations('bob') == []
+    with pytest.raises(ResourceNotFound):
+        store.get_shared_conversation('bob', identifier)

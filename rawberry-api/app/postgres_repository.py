@@ -1,7 +1,7 @@
 """PostgreSQL persistence behind the API storage boundary.
 
 Connections are scoped to an operation; uploads use one transaction for the batch.
-No DDL is run by the application. Apply the versioned migration before startup.
+No DDL is run by the application. Create the database from rawberry-db/init/schema.sql before startup.
 """
 
 from contextlib import contextmanager
@@ -11,7 +11,7 @@ from typing import Any
 from app.repository import StorageError
 from uuid import uuid4
 
-from app.conversation import TURN_TIMEOUT_SECONDS, messages_from_turns
+from app.conversation import CONVERSATION_TTL_SECONDS, TURN_TIMEOUT_SECONDS, describe_exchange, messages_from_turns
 from app.repository import ConversationBusy, ResourceNotFound
 from app.retrieval.embeddings import (
     EMBEDDING_DIMENSIONS,
@@ -20,6 +20,7 @@ from app.retrieval.embeddings import (
     VertexEmbeddingProvider,
     validate_embedding,
 )
+REQUIRED_SCHEMA_VERSION = 'baseline_001'
 
 
 class PostgresRepository:
@@ -51,8 +52,8 @@ class PostgresRepository:
     def check_ready(self) -> None:
         with self._connection() as connection:
             row = connection.execute(
-                "SELECT version FROM schema_migration WHERE version = %s",
-                ('003_vector_embeddings',),
+                "SELECT 1 FROM schema_migration WHERE version = %s",
+                (REQUIRED_SCHEMA_VERSION,),
             ).fetchone()
             if row is None:
                 raise StorageError("Required database migration is missing")
@@ -166,27 +167,29 @@ class PostgresRepository:
             else:
                 connection.execute("DELETE FROM user_preference WHERE user_id = %s", (user_id,))
 
-    def create_conversation(self, user_id: str, title: str) -> dict[str, Any]:
+    def create_conversation(self, user_id: str, title: str, domain: str = "education") -> dict[str, Any]:
         with self._connection() as connection:
             return connection.execute(
-                "INSERT INTO chat_session(public_id, user_id, title, created_at) "
-                "VALUES (%s, %s, %s, CURRENT_DATE) RETURNING public_id::text AS id, user_id, title, "
-                "created_ts AS created_at, updated_ts AS updated_at", (str(uuid4()), user_id, title),
+                "INSERT INTO chat_session(public_id, user_id, title, domain, created_at) "
+                "VALUES (%s, %s, %s, %s, CURRENT_DATE) RETURNING public_id::text AS id, user_id, title, domain, description, "
+                "created_ts AS created_at, updated_ts AS updated_at", (str(uuid4()), user_id, title, domain),
             ).fetchone()
 
     def list_conversations(self, user_id: str) -> list[dict[str, Any]]:
         with self._connection() as connection:
             return connection.execute(
-                "SELECT public_id::text AS id, user_id, title, created_ts AS created_at, updated_ts AS updated_at "
-                "FROM chat_session WHERE user_id = %s AND public_id IS NOT NULL ORDER BY created_ts, id",
-                (user_id,),
+                "SELECT public_id::text AS id, user_id, title, domain, description, created_ts AS created_at, updated_ts AS updated_at "
+                "FROM chat_session WHERE user_id = %s AND public_id IS NOT NULL "
+                "AND updated_ts > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') ORDER BY created_ts, id",
+                (user_id, CONVERSATION_TTL_SECONDS),
             ).fetchall()
 
     @staticmethod
     def _owned_conversation(connection, user_id: str, conversation_id: str):
         row = connection.execute(
-            "SELECT id FROM chat_session WHERE user_id = %s AND public_id::text = %s FOR UPDATE",
-            (user_id, conversation_id),
+            "SELECT id FROM chat_session WHERE user_id = %s AND public_id::text = %s "
+            "AND updated_ts > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') FOR UPDATE",
+            (user_id, conversation_id, CONVERSATION_TTL_SECONDS),
         ).fetchone()
         if row is None:
             raise ResourceNotFound()
@@ -228,16 +231,107 @@ class PostgresRepository:
                 "RETURNING id::text AS id, prompt, reply, status, created_at, completed_at",
                 (str(uuid4()), session_id, ordinal, message),
             ).fetchone()
-            return {**turn, 'history': list(reversed(history))}
+            domain = connection.execute(
+                'SELECT domain FROM chat_session WHERE id = %s', (session_id,),
+            ).fetchone()['domain']
+            return {**turn, 'history': list(reversed(history)), 'domain': domain}
 
     def finish_turn(self, user_id: str, conversation_id: str, turn_id: str, reply: str | None) -> None:
         with self._connection() as connection:
             session_id = self._owned_conversation(connection, user_id, conversation_id)
             result = connection.execute(
                 "UPDATE chat_turn SET reply = %s, status = %s, completed_at = CURRENT_TIMESTAMP "
-                "WHERE session_id = %s AND id::text = %s AND status = 'pending' RETURNING id",
+                "WHERE session_id = %s AND id::text = %s AND status = 'pending' RETURNING id, prompt",
                 (reply, 'completed' if reply is not None else 'failed', session_id, turn_id),
             ).fetchone()
             if result is None:
                 raise ConversationBusy()
-            connection.execute("UPDATE chat_session SET updated_ts = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
+            description = describe_exchange(result['prompt'], reply) if reply is not None else None
+            connection.execute("UPDATE chat_session SET updated_ts = CURRENT_TIMESTAMP, "
+                               "description = COALESCE(description, %s) WHERE id = %s", (description, session_id))
+
+    def purge_expired_conversations(self, batch_size: int = 500) -> int:
+        """Delete one locked batch atomically; never delete documents or preferences.
+
+        Skip sessions locked by API requests or another cleanup worker. A recent
+        pending turn is protected; abandoned turns cannot prevent cleanup forever.
+        Legacy sessions without API public IDs are outside this retention policy.
+        """
+        if batch_size <= 0:
+            raise ValueError('batch_size must be positive')
+        with self._connection() as connection:
+            rows = connection.execute(
+                "SELECT s.id FROM chat_session s WHERE s.public_id IS NOT NULL "
+                "AND s.updated_ts <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') "
+                "AND NOT EXISTS (SELECT 1 FROM chat_turn t WHERE t.session_id = s.id "
+                "AND t.status = 'pending' AND t.created_at > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')) "
+                "ORDER BY s.updated_ts, s.id LIMIT %s FOR UPDATE OF s SKIP LOCKED",
+                (CONVERSATION_TTL_SECONDS, TURN_TIMEOUT_SECONDS, batch_size),
+            ).fetchall()
+            ids = [row['id'] for row in rows]
+            if not ids:
+                return 0
+            # Delete in FK order, including legacy children attached to API sessions.
+            connection.execute("DELETE FROM citation WHERE message_id IN "
+                               "(SELECT id FROM message WHERE session_id = ANY(%s))", (ids,))
+            connection.execute("DELETE FROM message WHERE session_id = ANY(%s)", (ids,))
+            connection.execute("DELETE FROM chat_session_access WHERE session_id = ANY(%s)", (ids,))
+            connection.execute("DELETE FROM chat_turn WHERE session_id = ANY(%s)", (ids,))
+            connection.execute("DELETE FROM chat_session WHERE id = ANY(%s)", (ids,))
+            return len(ids)
+
+    def set_conversation_shares(self, user_id: str, conversation_id: str, recipient_ids: list[str]) -> list[str]:
+        with self._connection() as connection:
+            session_id = self._owned_conversation(connection, user_id, conversation_id)
+            # update shared list, revoke anyone no longer listed
+            connection.execute(
+                "UPDATE chat_session_access SET is_deleted = TRUE "
+                "WHERE session_id = %s AND NOT (user_id = ANY(%s))", (session_id, recipient_ids),
+                )
+            #If the share already existed but had previously been marked as deleted/revoked, reactivate it.
+            connection.execute(
+                "INSERT INTO chat_session_access(user_id, session_id) "
+                "SELECT DISTINCT unnest(%s::text[]), %s "
+                "ON CONFLICT(user_id, session_id) DO UPDATE SET is_deleted = FALSE", (recipient_ids, session_id),
+            )
+            return sorted(set(recipient_ids))
+
+    def list_conversation_shares(self, user_id: str, conversation_id: str) -> list[str]:
+        with self._connection() as connection:
+            session_id = self._owned_conversation(connection, user_id, conversation_id)
+            rows = connection.execute(
+                "SELECT user_id FROM chat_session_access WHERE session_id = %s AND NOT is_deleted "
+                "ORDER BY user_id", (session_id,),
+            ).fetchall()
+            return [row['user_id'] for row in rows]
+
+    def list_shared_conversations(self, user_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT s.public_id::text AS id, s.user_id, s.title, s.domain, s.description, "
+                "s.created_ts AS created_at, s.updated_ts AS updated_at "
+                "FROM chat_session_access a JOIN chat_session s ON s.id = a.session_id "
+                "WHERE a.user_id = %s AND NOT a.is_deleted "
+                "AND s.updated_ts > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') "
+                "ORDER BY s.updated_ts DESC, s.id",
+                (user_id, CONVERSATION_TTL_SECONDS),
+            ).fetchall()
+
+    def get_shared_conversation(self, user_id: str, conversation_id: str) -> dict[str, Any]:
+        with self._connection() as connection:
+            # No FOR UPDATE: viewers only read, and they shouldn't block the owner's chat.
+            conversation = connection.execute(
+                "SELECT s.id AS session_id, s.public_id::text AS id, s.user_id, s.title, s.domain, "
+                "s.description, s.created_ts AS created_at, s.updated_ts AS updated_at "
+                "FROM chat_session_access a JOIN chat_session s ON s.id = a.session_id "
+                "WHERE a.user_id = %s AND NOT a.is_deleted AND s.public_id::text = %s "
+                "AND s.updated_ts > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')",
+                (user_id, conversation_id, CONVERSATION_TTL_SECONDS),
+            ).fetchone()
+            if conversation is None:
+                raise ResourceNotFound()
+            turns = connection.execute(
+                "SELECT id::text AS id, prompt, reply, status, created_at, completed_at "
+                "FROM chat_turn WHERE session_id = %s ORDER BY ordinal", (conversation.pop('session_id'),),
+            ).fetchall()
+            return {'conversation': conversation, 'messages': messages_from_turns(turns)}

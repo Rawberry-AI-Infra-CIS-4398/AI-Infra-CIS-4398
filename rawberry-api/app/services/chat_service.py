@@ -2,6 +2,7 @@ import json
 import logging
 
 from app.config import Settings, get_settings
+from app.corpora import corpus_owner
 from app.repository import Repository, StorageError, ConversationBusy
 from app.services.gemini_service import GeminiChatClient, MockChatClient
 from app.user_models import ChatRequest, ChatResponse
@@ -30,9 +31,12 @@ class ChatService:
         conversation_id = str(request.conversation_id)
         turn = turn if turn is not None else self.prepare_turn(user_id, request)
         try:
-            chunks = self.store.search_chunks(user_id, request.message, limit=3)
+            # Retrieval uses the conversation's fixed shared corpus, never the user's uploads.
+            chunks = self.store.search_chunks(corpus_owner(turn['domain']), request.message, limit=3)
             preferences = self.store.get_system_prompt(user_id)
             message = request.message
+            # Only retrieved source passages enter document context; history is added separately below.
+            # With no matches, preserve the existing conversation behavior without claiming source evidence.
             if chunks:
                 context = ' '.join(chunk['text'] for chunk in chunks)
                 message = f'Use the following document context to answer the question: {context}. Question: {message}'
@@ -47,9 +51,7 @@ class ChatService:
                 remaining -= len(entry)
             if history:
                 message = 'Conversation history (prior messages):\n' + '\n'.join(reversed(history)) + '\nCurrent message:\n' + message
-            if preferences:
-                message = f'User response preferences (follow when relevant):\n{preferences}\n\nUser message:\n{message}'
-            reply = self.llm_client.generate_reply(message)
+            reply = self.llm_client.generate_reply(message, system_instruction=preferences or None)
         except Exception as exc:
             try:
                 self.store.finish_turn(user_id, conversation_id, turn['id'], None)
