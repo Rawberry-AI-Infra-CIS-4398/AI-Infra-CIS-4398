@@ -279,3 +279,59 @@ class PostgresRepository:
             connection.execute("DELETE FROM chat_turn WHERE session_id = ANY(%s)", (ids,))
             connection.execute("DELETE FROM chat_session WHERE id = ANY(%s)", (ids,))
             return len(ids)
+
+    def set_conversation_shares(self, user_id: str, conversation_id: str, recipient_ids: list[str]) -> list[str]:
+        with self._connection() as connection:
+            session_id = self._owned_conversation(connection, user_id, conversation_id)
+            # update shared list, revoke anyone no longer listed
+            connection.execute(
+                "UPDATE chat_session_access SET is_deleted = TRUE "
+                "WHERE session_id = %s AND NOT (user_id = ANY(%s))", (session_id, recipient_ids),
+                )
+            #If the share already existed but had previously been marked as deleted/revoked, reactivate it.
+            connection.execute(
+                "INSERT INTO chat_session_access(user_id, session_id) "
+                "SELECT DISTINCT unnest(%s::text[]), %s "
+                "ON CONFLICT(user_id, session_id) DO UPDATE SET is_deleted = FALSE", (recipient_ids, session_id),
+            )
+            return sorted(set(recipient_ids))
+
+    def list_conversation_shares(self, user_id: str, conversation_id: str) -> list[str]:
+        with self._connection() as connection:
+            session_id = self._owned_conversation(connection, user_id, conversation_id)
+            rows = connection.execute(
+                "SELECT user_id FROM chat_session_access WHERE session_id = %s AND NOT is_deleted "
+                "ORDER BY user_id", (session_id,),
+            ).fetchall()
+            return [row['user_id'] for row in rows]
+
+    def list_shared_conversations(self, user_id: str) -> list[dict[str, Any]]:
+        with self._connection() as connection:
+            return connection.execute(
+                "SELECT s.public_id::text AS id, s.user_id, s.title, s.domain, s.description, "
+                "s.created_ts AS created_at, s.updated_ts AS updated_at "
+                "FROM chat_session_access a JOIN chat_session s ON s.id = a.session_id "
+                "WHERE a.user_id = %s AND NOT a.is_deleted "
+                "AND s.updated_ts > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second') "
+                "ORDER BY s.updated_ts DESC, s.id",
+                (user_id, CONVERSATION_TTL_SECONDS),
+            ).fetchall()
+
+    def get_shared_conversation(self, user_id: str, conversation_id: str) -> dict[str, Any]:
+        with self._connection() as connection:
+            # No FOR UPDATE: viewers only read, and they shouldn't block the owner's chat.
+            conversation = connection.execute(
+                "SELECT s.id AS session_id, s.public_id::text AS id, s.user_id, s.title, s.domain, "
+                "s.description, s.created_ts AS created_at, s.updated_ts AS updated_at "
+                "FROM chat_session_access a JOIN chat_session s ON s.id = a.session_id "
+                "WHERE a.user_id = %s AND NOT a.is_deleted AND s.public_id::text = %s "
+                "AND s.updated_ts > CURRENT_TIMESTAMP - (%s * INTERVAL '1 second')",
+                (user_id, conversation_id, CONVERSATION_TTL_SECONDS),
+            ).fetchone()
+            if conversation is None:
+                raise ResourceNotFound()
+            turns = connection.execute(
+                "SELECT id::text AS id, prompt, reply, status, created_at, completed_at "
+                "FROM chat_turn WHERE session_id = %s ORDER BY ordinal", (conversation.pop('session_id'),),
+            ).fetchall()
+            return {'conversation': conversation, 'messages': messages_from_turns(turns)}

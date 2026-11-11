@@ -22,6 +22,7 @@ class InMemoryStore:
         self._conversations: dict[str, dict[str, Any]] = {}
         self._turns: dict[str, list[dict[str, Any]]] = {}
         self._lock = RLock()
+        self._shares: dict[str, set[str]] = {}  # conversation_id -> set of user_ids with access
 
 
     def save_documents(self, user_id: str, documents: list[tuple[dict[str, Any], bytes, list[dict[str, Any]]]]) -> list[str]:
@@ -132,4 +133,40 @@ class InMemoryStore:
             for identifier in expired:
                 del self._turns[identifier]
                 del self._conversations[identifier]
+                self._shares.pop(identifier, None)
             return len(expired)
+
+    def set_conversation_shares(self, user_id: str, conversation_id: str, recipient_ids: list[str]) -> list[str]:
+        with self._lock:
+            self._owned_conversation(user_id, conversation_id)
+            self._shares[conversation_id] = set(recipient_ids)
+            return sorted(self._shares[conversation_id])
+
+    def list_conversation_shares(self, user_id: str, conversation_id: str) -> list[str]:
+        with self._lock:
+            self._owned_conversation(user_id, conversation_id)
+            return sorted(self._shares.get(conversation_id, set()))
+
+    def _shared_conversation(self, user_id: str, conversation_id: str) -> dict[str, Any]:
+        # Same 404 for never shared, revoked, or expired, like _owned_conversation.
+        conversation = self._conversations.get(conversation_id)
+        if (conversation is None or user_id not in self._shares.get(conversation_id, set())
+                or (self._now() - conversation['updated_at']).total_seconds() >= CONVERSATION_TTL_SECONDS):
+            raise ResourceNotFound()
+        return conversation
+
+    def list_shared_conversations(self, user_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            shared = []
+            for conversation_id in self._shares:
+                try:
+                    shared.append(self._shared_conversation(user_id, conversation_id))
+                except ResourceNotFound:
+                    continue
+            return deepcopy(sorted(shared, key=lambda c: c['updated_at'], reverse=True))
+
+    def get_shared_conversation(self, user_id: str, conversation_id: str) -> dict[str, Any]:
+        with self._lock:
+            conversation = self._shared_conversation(user_id, conversation_id)
+            return {'conversation': deepcopy(conversation),
+                    'messages': messages_from_turns(deepcopy(self._turns[conversation_id]))}

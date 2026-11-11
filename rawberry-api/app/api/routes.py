@@ -2,6 +2,8 @@ import asyncio
 from typing import Annotated
 from uuid import UUID, uuid4
 
+from fastapi import HTTPException
+
 from fastapi import APIRouter, Depends, File, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
@@ -12,7 +14,7 @@ from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 from app.user_context import require_user
 from app.user_models import (ChatRequest, ChatResponse, ChatStatusEvent, ConversationRecord,
-                             ConversationRequest, DocumentRecord, MessageRecord,
+                             ConversationRequest, DocumentRecord, MessageRecord, ShareRequest, ShareResponse, SharedConversation,
                              SystemPromptRequest, SystemPromptResponse)
 
 router = APIRouter()
@@ -36,6 +38,7 @@ def read_root() -> RootResponse:
     return RootResponse(message='RAWBerry API is running', available_endpoints=[
         '/health', '/uploadmedical', '/uploadedu', '/chat', '/chat/stream',
         '/me/system-prompt', '/conversations', '/conversations/{conversation_id}/messages',
+        '/conversations/{conversation_id}/shares', '/shared', '/shared/{conversation_id}',
     ])
 
 
@@ -121,3 +124,21 @@ def chat_stream(request: ChatRequest, user_id: User, service: ChatService = Depe
 
 def _format_status_event(event: ChatStatusEvent) -> str:
     return f'event: status\ndata: {event.model_dump_json()}\n\n'
+
+@router.put('/conversations/{conversation_id}/shares', response_model=ShareResponse)
+def set_shares(conversation_id: UUID, request: ShareRequest, user_id: User, store: Repository = Depends(get_store)):
+    if user_id in request.user_ids:
+        raise HTTPException(422, 'You cannot share a conversation with yourself.')
+    return ShareResponse(user_ids=store.set_conversation_shares(user_id, str(conversation_id), request.user_ids))
+
+@router.get('/conversations/{conversation_id}/shares', response_model=ShareResponse)
+def get_shares(conversation_id: UUID, user_id: User, store: Repository = Depends(get_store)):
+    return ShareResponse(user_ids=store.list_conversation_shares(user_id, str(conversation_id)))
+
+@router.get('/shared', response_model=list[ConversationRecord])
+def list_shared(user_id: User, store: Repository = Depends(get_store)):
+    return store.list_shared_conversations(user_id)
+
+@router.get('/shared/{conversation_id}', response_model=SharedConversation)
+def get_shared(conversation_id: UUID, user_id: User, store: Repository = Depends(get_store)):
+    return store.get_shared_conversation(user_id, str(conversation_id))

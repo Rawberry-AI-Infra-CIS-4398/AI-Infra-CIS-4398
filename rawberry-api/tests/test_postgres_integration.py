@@ -338,3 +338,39 @@ def test_query_embedding_failure_records_failed_turn_without_generation(database
         history = client.get(f'/conversations/{identifier}/messages').json()
         assert len(history) == 1 and history[0]['status'] == 'failed'
     llm.generate_reply.assert_not_called()
+
+
+def test_postgres_sharing_is_read_only_revocable_and_expires(database_url):
+    import psycopg
+
+    store = PostgresRepository(database_url)
+    identifier = store.create_conversation('alice', 'Shared')['id']
+    turn = store.start_turn('alice', identifier, 'What is gamma?')
+    store.finish_turn('alice', identifier, turn['id'], 'Gamma is a letter.')
+
+    assert store.set_conversation_shares('alice', identifier, ['carol', 'bob', 'bob']) == ['bob', 'carol']
+    assert store.list_conversation_shares('alice', identifier) == ['bob', 'carol']
+    assert [c['id'] for c in store.list_shared_conversations('bob')] == [identifier]
+    view = store.get_shared_conversation('bob', identifier)
+    assert view['conversation']['user_id'] == 'alice' and 'session_id' not in view['conversation']
+    assert [m['content'] for m in view['messages']] == ['What is gamma?', 'Gamma is a letter.']
+    with pytest.raises(ResourceNotFound):
+        store.start_turn('bob', identifier, 'Recipients cannot write')
+    with pytest.raises(ResourceNotFound):
+        store.set_conversation_shares('bob', identifier, ['dave'])
+
+    # Revoking flags the row; sharing again restores the same row.
+    assert store.set_conversation_shares('alice', identifier, ['carol']) == ['carol']
+    with pytest.raises(ResourceNotFound):
+        store.get_shared_conversation('bob', identifier)
+    store.set_conversation_shares('alice', identifier, ['bob'])
+    assert store.get_shared_conversation('bob', identifier)['messages']
+    with psycopg.connect(database_url) as connection:
+        assert connection.execute("SELECT count(*) FROM chat_session_access WHERE user_id = 'bob'").fetchone()[0] == 1
+
+    with psycopg.connect(database_url) as connection:
+        connection.execute("UPDATE chat_session SET updated_ts = CURRENT_TIMESTAMP - INTERVAL '25 hours' "
+                           "WHERE public_id = %s", (identifier,))
+    assert store.list_shared_conversations('bob') == []
+    with pytest.raises(ResourceNotFound):
+        store.get_shared_conversation('bob', identifier)

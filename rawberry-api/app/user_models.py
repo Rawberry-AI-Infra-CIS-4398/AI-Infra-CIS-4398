@@ -1,9 +1,9 @@
 """User-scoped contracts; identity is supplied by the trusted upstream service."""
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 
 class RequestModel(BaseModel):
@@ -81,3 +81,15 @@ class MessageRecord(BaseModel):
     content: str
     status: Literal["pending", "completed", "failed"]
     created_at: datetime
+
+UserId = Annotated[str, StringConstraints(pattern=r'^[!-~]{1,128}$')]
+
+class ShareRequest(RequestModel):
+    user_ids: list[UserId] = Field(max_length=50)
+
+class ShareResponse(BaseModel):
+    user_ids: list[str]
+
+class SharedConversation(BaseModel):
+    conversation: ConversationRecord
+    messages: list[MessageRecord]

@@ -24,9 +24,9 @@ returns the same 404 as a nonexistent conversation. Uploads require a separate d
 
 - Configurable PostgreSQL persistence; isolated in-memory mode without `DATABASE_URL`.
 - Multi-file uploads: PDF, DOCX, and UTF-8 TXT; 25 MiB per-file limit.
-- TXT and PDF text extraction and chunking (`app/ingestion.py`, shared with the root
-  `ingestion_pipeline.py`), with persisted Vertex AI embeddings and owner-filtered
-  pgvector search in PostgreSQL mode.
+- TXT, PDF, and DOCX text extraction and chunking (`app/ingestion.py`, shared with the
+  root `ingestion_pipeline.py` along with the file type, size, and signature rules),
+  with persisted Vertex AI embeddings and owner-filtered pgvector search in PostgreSQL mode.
 - Deterministic hash-vector retrieval in the isolated in-memory development mode.
 - Optional Vertex AI Gemini generation, or mock responses for local development.
 - Per-user response preferences passed through Gemini's dedicated `system_instruction` configuration.
@@ -76,6 +76,10 @@ when creating a conversation; that choice stays fixed for its lifetime.
 | `GET /conversations/{conversation_id}/messages` | Read owned conversation history |
 | `POST /chat` | Generate and store a turn in an owned conversation |
 | `POST /chat/stream` | Same chat behavior with SSE lifecycle events |
+| `PUT /conversations/{conversation_id}/shares` | Replace the list of users an owned conversation is shared with |
+| `GET /conversations/{conversation_id}/shares` | List who an owned conversation is shared with |
+| `GET /shared` | List conversations other users have shared with the current user |
+| `GET /shared/{conversation_id}` | Read a shared conversation and its messages (read-only) |
 
 Create a conversation with `POST /conversations`:
 
@@ -185,6 +189,37 @@ SSE uses the `status` event with one `request_id`: `received`, `generating`, the
 Disconnecting does not guarantee cancellation of the worker; pending work can finish
 or be recovered through the timeout rule. This is lifecycle reporting, not token streaming.
 
+## Shared conversations
+
+Owners share a conversation read-only with specific users. `PUT
+/conversations/{conversation_id}/shares` replaces the full recipient list, so it both
+shares and revokes; `{"user_ids": []}` revokes everyone. Recipient IDs use the same
+format as `X-User-ID`, at most 50 per request, and owners cannot list themselves (422).
+
+```json
+{"user_ids": ["bob", "carol"]}
+```
+
+Recipients find shared conversations with `GET /shared` and read one with `GET
+/shared/{conversation_id}`, which returns `{"conversation": {...}, "messages": [...]}`
+in the same message format as the owner's history. Sharing grants no write access:
+recipients still receive 404 from `/chat`, `/chat/stream`,
+`/conversations/{conversation_id}/messages`, and the share list. Never shared,
+revoked, and expired conversations all return the same 404. Shares end when the
+conversation expires and are deleted with it.
+
+Shares are stored in `chat_session_access`, one row per recipient per conversation;
+revoking sets `is_deleted` and sharing again restores the same row. Sharing is by
+user ID only. Link-based sharing would need a token column added to `schema.sql`.
+
+### Refreshing shared views
+
+The API does not push updates. Clients poll `GET /shared/{conversation_id}` every 15
+seconds (FR-06 allows 10-30) and re-render only when `conversation.updated_at` changes;
+it advances when a turn starts and when it finishes. An in-progress question appears
+with `status: "pending"` and its answer arrives on a later poll. Each poll is two
+indexed queries, so no caching is needed at this interval.
+
 ## Errors and verification
 
 - 422: missing/invalid/duplicate identity header, obsolete fields, or invalid payload.
@@ -236,8 +271,8 @@ re-embedding chunks. Model errors return a safe 503; there is no silent hash fal
 
 Embedding happens before the upload transaction, then original bytes, chunks, and
 vectors are saved together. An embedding or database failure leaves no partial batch.
-Upload responses report `embedding_status=completed` only after commit. DOCX
-uploads and PDFs without extractable text remain `pending` with no chunks.
+Upload responses report `embedding_status=completed` only after commit. PDFs
+without extractable text and DOCX files without text remain `pending` with no chunks.
 Processing is synchronous; large batches may be slow and will need a worker in a
 later sprint.
 
@@ -305,16 +340,3 @@ pipeline. Uploading again adds documents; this API does not yet replace or versi
 an existing corpus. In-memory uploads disappear at restart; production presets
 require PostgreSQL.
 
-Possible future API designs:
-
-- A generic developer endpoint such as `POST /admin/corpora/{domain}/documents`
-  and `GET /corpora/{domain}/documents` scales to more specialties. The current
-  two upload paths can remain aliases of the same ingestion implementation.
-- A deployment job or CLI can ingest reviewed, versioned document bundles without
-  exposing any HTTP upload endpoint. Chat requests still select a fixed corpus.
-- Separate indexes or services per domain provide stronger operational isolation
-  when access, retention, embedding models, or release schedules diverge.
-
-For two presets, one chat service and two explicitly scoped collections keep the
-implementation small. Avoid routing solely from the question's wording: an explicit
-preset choice gives predictable sources and keeps conversation history in one domain.
