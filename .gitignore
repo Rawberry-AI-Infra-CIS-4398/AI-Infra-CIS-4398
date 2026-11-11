@@ -34,6 +34,11 @@ dist/
 .pytest_cache/
 .coverage
 htmlcov/
+tests/e2e/.auth/
+tests/e2e/.artifacts/
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
 
 #Logs
 *.log

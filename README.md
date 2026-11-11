@@ -17,6 +17,8 @@ See the [API README](rawberry-api/README.md#authentication-boundary-and-user-con
 for the responsibility boundary and current limitations, the
 [database README](rawberry-db/README.MD) for schema setup, and
 [run instructions](rawberry-api/run.md) for local Google Cloud configuration.
+See the [validation guide](docs/validation-and-testing.md) for backend,
+database, and local QuagBot browser checks.
 ## Requirements
 - Python 3.12+
 

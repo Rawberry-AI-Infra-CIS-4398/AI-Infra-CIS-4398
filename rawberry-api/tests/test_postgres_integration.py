@@ -4,19 +4,23 @@ Tests create/drop an isolated schema and enable the vector extension if needed.
 They never read DATABASE_URL, preventing accidental use of an application database.
 """
 
+import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.routes import get_chat_service
 from app.main import create_app
 from app.postgres_repository import PostgresRepository
 from app.repository import ConversationBusy, ResourceNotFound, StorageError
 from app.retrieval.embeddings import HashEmbeddingProvider
+from app.services.chat_service import ChatService
 from pdf_samples import make_pdf
-from test_api import exercise_isolation
+from test_api import ask, conversation, exercise_isolation
 
 TEXT_PDF = make_pdf('gamma from PDF')
 
@@ -148,6 +152,45 @@ def test_invalid_api_batch_writes_nothing(database_url):
 
 def test_postgres_isolation_and_conversations(database_url):
     exercise_isolation(PostgresRepository(database_url))
+
+
+@pytest.mark.parametrize('padding,expected_turns', [(0, 10), (3000, 3)])
+def test_model_context_is_bounded_while_postgres_history_stays_complete(database_url, padding, expected_turns):
+    store = PostgresRepository(database_url)
+    app = create_app(store=store)
+    model = MagicMock()
+    model.generate_reply.return_value = 'Recorded answer'
+    app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=model)
+    messages = [f'Prior question {index} ' + 'x' * padding for index in range(12)]
+    messages = [message.rstrip() for message in messages]
+    preference = 'Keep responses brief.'
+
+    with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
+        identifier = conversation(client)
+        assert client.put('/me/system-prompt', json={'prompt': preference}).status_code == 200
+        for message in messages:
+            assert ask(client, identifier, message).status_code == 200
+        model.generate_reply.side_effect = RuntimeError('Test model failure')
+        assert ask(client, identifier, 'Failed question').status_code == 502
+        model.generate_reply.side_effect = None
+
+        assert ask(client, identifier, 'Current question').status_code == 200
+        prompt, = model.generate_reply.call_args.args
+        context, current = prompt.split('\nCurrent message:\n')
+        assert current == 'Current question'
+        assert [json.loads(line) for line in context.splitlines()[1:]] == [
+            {'user': message, 'assistant': 'Recorded answer'} for message in messages[-expected_turns:]
+        ]
+        assert model.generate_reply.call_args.kwargs == {'system_instruction': preference}
+        assert preference not in prompt
+
+        history = client.get(f'/conversations/{identifier}/messages')
+        assert history.status_code == 200
+        assert [(entry['content'], entry['status']) for entry in history.json() if entry['role'] == 'user'] == [
+            *((message, 'completed') for message in messages),
+            ('Failed question', 'failed'),
+            ('Current question', 'completed'),
+        ]
 
 
 def test_pgvector_persists_ranks_and_filters_owners_and_models(database_url):
