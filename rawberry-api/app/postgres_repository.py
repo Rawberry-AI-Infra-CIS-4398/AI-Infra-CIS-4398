@@ -58,6 +58,14 @@ class PostgresRepository:
             if row is None:
                 raise StorageError("Required database migration is missing")
 
+    def check_database_connection(self) -> None:
+        """Probe the configured database without reading application data."""
+        with self._connection() as connection:
+            connection.execute("SET LOCAL statement_timeout = '3s'")
+            row = connection.execute("SELECT 1 AS connected").fetchone()
+            if row is None or row['connected'] != 1:
+                raise StorageError("Database connectivity check failed")
+
 
     def save_documents(self, user_id: str, documents: list[tuple[dict[str, Any], bytes, list[dict[str, Any]]]]) -> list[str]:
         """Atomically save original files, extracted chunks, and their embeddings.

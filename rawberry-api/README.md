@@ -18,7 +18,7 @@ that is a development convenience, not proof of identity.
 
 RAWBerry uses this user context to scope preferences and conversations.
 Documents and retrieved chunks belong to shared medical or education corpora. Another user's conversation
-returns the same 404 as a nonexistent conversation. Uploads require a separate developer API key; end users cannot upload. `/` and `/health` do not require user context.
+returns the same 404 as a nonexistent conversation. Uploads require a separate developer API key; end users cannot upload. `/`, `/health`, and `/health/db` do not require user context.
 
 ## Current implementation
 
@@ -52,6 +52,44 @@ process restarts and are not shared across processes. See the
 [database README](../rawberry-db/README.MD) for schema setup and
 [run.md](run.md) for local Google Cloud configuration.
 
+## Cloud Run / Cloud SQL connection check
+
+`GET /health/db` opens a fresh connection through the running application's
+PostgreSQL repository and executes `SELECT 1`. It requires no `X-User-ID` header
+(Cloud Run IAM access rules still apply). Responses are not cached:
+
+- **200**: `{"status":"healthy","database":"connected"}`
+- **503**, memory mode: `{"status":"unhealthy","database":"not_configured"}`
+- **503**, connection/query failure: `{"status":"unhealthy","database":"unavailable"}`
+
+For `runberry`, the attached instance is `rawberryapi:us-east4:raberry-db`.
+Attachment and the Cloud SQL Client IAM role alone do not configure application
+credentials. Set `DATABASE_URL` using the actual database name, database user,
+and password, with the Unix socket as host. For example, this libpq connection
+string is supported (replace placeholders; quote/escape values using libpq rules):
+
+```text
+dbname=YOUR_DATABASE user=YOUR_DATABASE_USER password=YOUR_PASSWORD host=/cloudsql/rawberryapi:us-east4:raberry-db
+```
+
+Keep the real value in secret configuration. After deploying this branch, check
+the service URL from Cloud Run:
+
+```powershell
+curl.exe -i "https://YOUR_SERVICE_URL/health/db"
+```
+
+A successful response verifies the configured database connection, authentication,
+and a simple query; it does not independently verify the Cloud SQL instance identity,
+all table permissions, or Vertex AI. Verify the configured socket path matches
+the intended instance. Connections use a five-second connect timeout and the
+probe query uses a three-second statement timeout.
+
+`/health` remains process liveness. Startup still requires the existing
+`baseline_001` schema migration check to succeed. If database connectivity or that
+migration fails at startup, the revision cannot serve this endpoint; inspect
+Cloud Run startup logs. This endpoint also detects database failures after startup.
+
 ## API contract
 
 This branch intentionally changes the prototype's user/session contract. Identity
@@ -65,6 +103,7 @@ when creating a conversation; that choice stays fixed for its lifetime.
 | --- | --- |
 | `GET /` | Status and endpoint listing; no user header required |
 | `GET /health` | Process liveness; no user header required |
+| `GET /health/db` | Live PostgreSQL connection check; 503 if unavailable or not configured; no user header required |
 | `POST /uploadmedical` | Developer-only upload of medical multipart `files` |
 | `POST /uploadedu` | Developer-only upload of education multipart `files` |
 | `GET /uploadmedical` | List shared medical document metadata; requires user header |
