@@ -1,132 +1,93 @@
 # RAWBerry API
 
-FastAPI backend for document ingestion, chunking, RAG retrieval, and Gemini calls.
-Authentication and account management belong to the upstream application.
-
-## Authentication boundary and user context
-
-Every user data endpoint requires one `X-User-ID` header supplied by the trusted upstream
-backend or gateway. IDs are opaque, case-sensitive strings of 1-128 printable ASCII
-characters without spaces. `42`, `042`, `Alice`, and `alice` are distinct users.
-This provisional format must be confirmed with the upstream team before integration.
-
-The header is **not authentication**. The upstream service must authenticate users,
-strip client-supplied identity headers, set the actual user's ID, and restrict direct
-access to RAWBerry. This backend does not provide login, registration, password
-storage, or account sessions. Local Swagger testing lets you manually enter an ID;
-that is a development convenience, not proof of identity.
-
-RAWBerry uses this user context to scope preferences and conversations.
-Documents and retrieved chunks belong to shared medical or education corpora. Another user's conversation
-returns the same 404 as a nonexistent conversation. Uploads require a separate developer API key; end users cannot upload. `/`, `/health`, and `/health/db` do not require user context.
-
-## Current implementation
-
-- Configurable PostgreSQL persistence; isolated in-memory mode without `DATABASE_URL`.
-- Multi-file uploads: PDF, DOCX, and UTF-8 TXT; 25 MiB per-file limit.
-- TXT, PDF, and DOCX text extraction and chunking (`app/ingestion.py`, shared with the
-  root `ingestion_pipeline.py` along with the file type, size, and signature rules),
-  with persisted Vertex AI embeddings and owner-filtered pgvector search in PostgreSQL mode.
-- Deterministic hash-vector retrieval in the isolated in-memory development mode.
-- Optional Vertex AI Gemini generation, or mock responses for local development.
-- Per-user response preferences passed through Gemini's dedicated `system_instruction` configuration.
-- Independent conversations with ordered user/assistant history and generation states.
-- SSE chat lifecycle events; generated tokens are not streamed individually.
-
-DOCX text extraction, OCR for scanned PDFs, citations, and sharing remain future work. Documents enter the RAG pipeline only through developer-only `POST /uploadmedical` and `POST /uploadedu`; pasted-text
-submission is not supported. Chat messages remain part of conversation history.
+FastAPI backend for medical and education document retrieval, Gemini chat,
+conversation history, and read-only conversation sharing.
 
 ## Run locally
 
+Requires Python 3.12+. From the repository root:
+
 ```powershell
-Set-Location rawberry-api
+.\run.ps1 -InstallDependencies
+```
+
+For later runs, use `.\run.ps1`. Alternatively, from `rawberry-api`:
+
+```powershell
 python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --reload
 ```
 
-Swagger: <http://127.0.0.1:8000/docs>. Expand an endpoint, click **Try it out**, and
-enter `X-User-ID` (for example, `alice`). Developers use the file picker on either upload endpoint and supply `X-Developer-Key`.
+Open <http://127.0.0.1:8000/docs> for request schemas and interactive testing.
+See [run.md](run.md) for Google Cloud setup and [the database README](../rawberry-db/README.MD)
+for PostgreSQL schema setup.
 
-Without `DATABASE_URL`, all content and conversations disappear when the API
-process restarts and are not shared across processes. See the
-[database README](../rawberry-db/README.MD) for schema setup and
-[run.md](run.md) for local Google Cloud configuration.
+## Configuration
 
-## Cloud Run / Cloud SQL connection check
+Set environment variables before starting the API; `.env` files are not loaded automatically.
 
-`GET /health/db` opens a fresh connection through the running application's
-PostgreSQL repository and executes `SELECT 1`. It requires no `X-User-ID` header
-(Cloud Run IAM access rules still apply). Responses are not cached:
-
-- **200**: `{"status":"healthy","database":"connected"}`
-- **503**, memory mode: `{"status":"unhealthy","database":"not_configured"}`
-- **503**, connection/query failure: `{"status":"unhealthy","database":"unavailable"}`
-
-For `runberry`, the attached instance is `rawberryapi:us-east4:raberry-db`.
-Attachment and the Cloud SQL Client IAM role alone do not configure application
-credentials. Set `DATABASE_URL` using the actual database name, database user,
-and password, with the Unix socket as host. For example, this libpq connection
-string is supported (replace placeholders; quote/escape values using libpq rules):
-
-```text
-dbname=YOUR_DATABASE user=YOUR_DATABASE_USER password=YOUR_PASSWORD host=/cloudsql/rawberryapi:us-east4:raberry-db
-```
-
-Keep the real value in secret configuration. After deploying this branch, check
-the service URL from Cloud Run:
-
-```powershell
-curl.exe -i "https://YOUR_SERVICE_URL/health/db"
-```
-
-A successful response verifies the configured database connection, authentication,
-and a simple query; it does not independently verify the Cloud SQL instance identity,
-all table permissions, or Vertex AI. Verify the configured socket path matches
-the intended instance. Connections use a five-second connect timeout and the
-probe query uses a three-second statement timeout.
-
-`/health` remains process liveness. Startup still requires the existing
-`baseline_001` schema migration check to succeed. If database connectivity or that
-migration fails at startup, the revision cannot serve this endpoint; inspect
-Cloud Run startup logs. This endpoint also detects database failures after startup.
-
-## API contract
-
-This branch intentionally changes the prototype's user/session contract. Identity
-comes only from `X-User-ID`; JSON/form/query `userid`, `user_id`, and `owner_id` are
-not alternative identity sources. Request models reject extra fields; uploads reject
-legacy identity form fields. The old `/users/{userid}/system-prompt` route is removed.
-`data.window` and `data.agent` are removed from chat requests. Select `domain`
-when creating a conversation; that choice stays fixed for its lifetime.
-
-| Endpoint | Behavior |
+| Variable | Purpose |
 | --- | --- |
-| `GET /` | Status and endpoint listing; no user header required |
-| `GET /health` | Process liveness; no user header required |
-| `GET /health/db` | Live PostgreSQL connection check; 503 if unavailable or not configured; no user header required |
-| `POST /uploadmedical` | Developer-only upload of medical multipart `files` |
-| `POST /uploadedu` | Developer-only upload of education multipart `files` |
-| `GET /uploadmedical` | List shared medical document metadata; requires user header |
-| `GET /uploadedu` | List shared education document metadata; requires user header |
-| `GET /me/system-prompt` | Read the current user's preferences |
-| `PUT /me/system-prompt` | Update preferences; empty prompt clears them |
-| `POST /conversations` | Create an independent conversation |
-| `GET /conversations` | List the current user's conversations |
-| `GET /conversations/{conversation_id}/messages` | Read owned conversation history |
-| `POST /chat` | Generate and store a turn in an owned conversation |
-| `POST /chat/stream` | Same chat behavior with SSE lifecycle events |
-| `PUT /conversations/{conversation_id}/shares` | Replace the list of users an owned conversation is shared with |
-| `GET /conversations/{conversation_id}/shares` | List who an owned conversation is shared with |
-| `GET /shared` | List conversations other users have shared with the current user |
-| `GET /shared/{conversation_id}` | Read a shared conversation and its messages (read-only) |
+| `DATABASE_URL` | PostgreSQL connection string. Without it, storage is in memory and disappears on restart; separate processes do not share data. |
+| `DEVELOPER_UPLOAD_API_KEY` | Secret required for document uploads. Uploads are disabled if unset. |
+| `USE_MOCK_CHAT` | Defaults to `true`. Set to `false` for real Gemini answers. |
+| `GOOGLE_CLOUD_PROJECT` | Google Cloud project for Vertex AI. |
+| `GOOGLE_CLOUD_LOCATION` | Vertex AI location; defaults to `global`. |
+| `GEMINI_MODEL` | Chat model; defaults to `gemini-2.5-flash`. |
 
-Create a conversation with `POST /conversations`:
+PostgreSQL mode requires the supplied database schema and Vertex AI access for
+embeddings, even when chat responses are mocked. The API does not apply migrations.
+Local development uses Application Default Credentials; Cloud Run uses its service account.
+
+## Authentication boundary and user context
+
+Authentication and account management belong to the upstream application.
+
+- User data routes require `X-User-ID`, supplied by the authenticated upstream backend or gateway.
+- IDs are case-sensitive, 1-128 printable ASCII characters without spaces. The reserved IDs `corpus:medical` and `corpus:education` cannot identify users.
+- `X-User-ID` is not authentication. The upstream service must strip client-supplied identity headers, supply the authenticated user's ID, and restrict direct API access.
+- Upload POST routes require `X-Developer-Key` matching `DEVELOPER_UPLOAD_API_KEY`; they do not require `X-User-ID`. Keep the key out of frontend code and Git.
+- `/`, `/health`, `/health/db`, and documentation routes require neither header. Cloud Run IAM access rules still apply.
+
+In Swagger, enter the appropriate header under **Try it out**. JSON request bodies
+reject extra fields; identity belongs in the header, not the body.
+
+## Routes
+
+| Route | Purpose |
+| --- | --- |
+| `GET /` | Return the API status message and endpoint list. |
+| `GET /health` | Check that the API process is running. |
+| `GET /health/db` | Check connectivity to the configured PostgreSQL database. |
+| `POST /uploadmedical` | Upload source documents to the shared medical RAG corpus. |
+| `POST /uploadedu` | Upload source documents to the shared education RAG corpus. |
+| `GET /uploadmedical` | List metadata for medical source documents. |
+| `GET /uploadedu` | List metadata for education source documents. |
+| `GET /me/system-prompt` | Read the current user's response preferences. |
+| `PUT /me/system-prompt` | Set or clear the current user's response preferences. |
+| `POST /conversations` | Create a conversation with a fixed medical or education domain. |
+| `GET /conversations` | List the current user's non-expired conversations. |
+| `GET /conversations/{conversation_id}/messages` | Read the owner's saved conversation messages. |
+| `POST /chat` | Generate an answer and save the exchange, returning the full answer when finished. |
+| `POST /chat/stream` | Generate and save the same exchange while sending progress events, followed by the full answer; does not stream individual words or tokens. |
+| `PUT /conversations/{conversation_id}/shares` | Replace the users granted read-only access to an owned conversation. |
+| `GET /conversations/{conversation_id}/shares` | List users granted access to an owned conversation. |
+| `GET /shared` | List conversations shared with the current user. |
+| `GET /shared/{conversation_id}` | Read a conversation and its messages shared with the current user. |
+| `GET /docs` | Open the interactive Swagger API documentation. |
+| `GET /redoc` | Open the ReDoc API reference. |
+| `GET /openapi.json` | Return the machine-readable OpenAPI specification. |
+
+## Chat and history
+
+Create a conversation with `POST /conversations` and `X-User-ID`:
 
 ```json
 {"title": "Research questions", "domain": "education"}
 ```
 
-Use its returned `id` as `conversation_id` in either chat endpoint:
+`domain` is required (`medical` or `education`) and stays fixed. The title is optional.
+Use the returned `id` in `POST /chat` or `POST /chat/stream` with the same user header:
 
 ```json
 {
@@ -135,247 +96,100 @@ Use its returned `id` as `conversation_id` in either chat endpoint:
 }
 ```
 
-The response includes `conversation_id`, `turn_id`, and `reply`. Update preferences
-with `{"prompt": "Keep answers concise."}`.
+`/chat` returns `conversation_id`, `turn_id`, and `reply` in one JSON response.
+`/chat/stream` returns SSE `status` events: `received`, `generating`, then
+`completed` or `failed`. The completed event contains the answer in `response.reply`.
+It reports progress, not individual words or tokens. There is no `/chat/status` route.
+Clients must inspect the stream's final event to determine success.
 
-Preferences are loaded for each turn and sent separately from the user message,
-retrieved document context, and conversation history. Updates apply to subsequent
-turns in existing and new chats; an empty preference clears the system instruction.
-Mock mode accepts the same configuration but only echoes message content and does
-not simulate tone or length preferences. No schema migration is needed.
+Both endpoints save the question before generation and the answer on success.
+Failed questions remain in history with `status: "failed"`. History includes
+ordered messages with role, content, turn ID, status, and timestamp.
 
-## Document-only RAG input
+- `GET /conversations` lists the user's conversations, including titles and descriptions.
+- `GET /conversations/{conversation_id}/messages` returns an owned conversation's messages.
+- The first successful exchange supplies a short description; the title remains caller-supplied.
+- Conversations expire after **24 hours of inactivity**. Reading history does not extend this period.
+- Only one generation may run per conversation. Concurrent requests return 409; abandoned pending turns can recover after five minutes.
+- Requests are not idempotent. Check history before retrying after a network failure; disconnecting does not guarantee cancellation.
 
-Developers use `POST /uploadmedical` or `POST /uploadedu` to submit source files.
-Users can list the matching corpus metadata with GET on the same paths. TXT and PDF files produce searchable chunks
-of up to 900 characters, split on paragraph/sentence/word boundaries with 100
-characters of overlap. PDF chunks keep their 1-based page number. PDFs without a
-text layer (scans) and DOCX files are stored with no chunks. A PDF that cannot be
-parsed (damaged or password-protected) is rejected with `UNREADABLE_FILE`.
-Uploaded content is scoped to the medical or education corpus, independently of user identity.
+Each conversation uses its own history and retrieves sources from its selected
+shared corpus. Set response preferences using `PUT /me/system-prompt` with
+`{"prompt":"Keep answers concise."}`; an empty prompt clears them. Preferences
+apply to subsequent turns across the user's conversations.
 
-`POST /ingest` and `GET /get` have been removed and return 404. Chat responses no
-longer include `recent_items`. Existing pasted-text database rows are retained as
-legacy data but are not exposed, searched, or supplied to the model. No destructive
-database migration is needed for this API change.
+## Document uploads
 
-A user's chat questions and assistant replies are recorded through `/chat` or
-`/chat/stream` in the selected conversation. They are conversation history, not
-uploaded source documents.
-
-## Conversation behavior
-
-Conversation creation/listing responses include a nullable `description` (maximum
-300 characters). New conversations have `description: null`. The first successful
-exchange automatically saves compact question and answer excerpts, with whitespace
-normalized and long text shortened at word boundaries. This is an extractive
-preview, not an additional AI-generated summary, and makes no extra model request.
-It is saved atomically with the completed turn, works for both chat endpoints, and
-is not overwritten by later turns. Failed turns do not create descriptions. Existing
-conversations with null descriptions receive one on their next successful exchange;
-there is no bulk backfill. Titles remain caller-supplied.
-
-Descriptions are stored in the nullable `chat_session.description` column, limited
-to 300 characters.
-
-Conversations expire after **24 hours of inactivity**, measured from the last
-turn start or completion. Reading/listing history does not extend the lifetime.
-Expired conversations disappear from listings and history/chat requests return
-404, including streaming requests before the stream starts. An expired chat cannot
-be revived; create a new conversation instead. Active chats can last more than a
-day: this is an inactivity policy, not a fixed lifetime from creation.
-
-Physical deletion is a separate scheduled operation. Run from `rawberry-api`:
+Developers upload sources through `POST /uploadmedical` or `POST /uploadedu` using
+`X-Developer-Key`. Send multipart form data under `files`, repeating that field for
+multiple files. Let your HTTP client set the multipart boundary.
 
 ```powershell
-python -B -m app.cleanup_conversations --batch-size 500
+curl.exe -X POST "http://127.0.0.1:8000/uploadedu" -H "X-Developer-Key: $env:DEVELOPER_UPLOAD_API_KEY" -F "files=@example.txt"
 ```
 
-The command requires `DATABASE_URL`, deletes at most 500 expired conversations per
-invocation (configurable), and reports a JSON count. Schedule it every 15 minutes;
-increase frequency/batch size if the expiration backlog exceeds that capacity.
-Until cleanup runs, expired data remains stored but inaccessible through the API.
-The command deletes related turns, legacy messages/citations, and access rows in
-one transaction. It preserves uploaded documents, embeddings, and user preferences.
-Legacy sessions without public API IDs are excluded. Recent pending generations
-are protected for the existing five-minute timeout; stale pending turns do not
-block deletion indefinitely. Concurrent cleanup workers skip locked conversations.
+Supported files: **PDF, DOCX, and UTF-8 TXT**, up to **25 MiB per file**. Readable
+text is extracted, cleaned, and chunked for retrieval. OCR is not supported.
+Unreadable files or files with no readable text are rejected.
 
-For GCP, package this command as the Cloud Run Job command/arguments using the API
-image and the same database connectivity/secrets as the API. Configure the scheduler
-and job in deployment infrastructure; this change does not provision cloud resources
-or install a schedule automatically. In-memory development storage enforces the same
-expiration checks and offers `purge_expired_conversations()` for local cleanup; the
-scheduled command intentionally refuses to fall back to in-memory storage.
+Upload responses include document IDs, chunk counts, and `embedding_status`.
+PostgreSQL mode reports `completed` after indexing succeeds; in-memory development
+uses temporary hash-based retrieval and reports `pending`. Processing is synchronous.
 
-Each conversation has independent history, but may retrieve from **all documents
-owned by its user**, including documents uploaded after the conversation was created.
-The model receives at most ten completed prior turns with a 12,000-character history
-budget. Failed/pending turns and other conversations are excluded from model history.
-
-The user message is persisted before generation. A successful turn adds the assistant
-reply; failure retains the user message with `failed` status. The history API returns
-ordered message records with role, content, turn ID, status, and timestamp.
-
-Only one generation can be pending in a conversation. A concurrent request receives
-409. Other conversations can proceed independently. An abandoned pending turn becomes
-failed when a new request arrives after five minutes; a late completion cannot overwrite
-it. Clients should check history before retrying after a network failure because a
-request may have completed. Requests are not idempotent.
-
-SSE uses the `status` event with one `request_id`: `received`, `generating`, then
-`completed` or `failed`. Ownership and busy checks run before the stream starts.
-Disconnecting does not guarantee cancellation of the worker; pending work can finish
-or be recovered through the timeout rule. This is lifecycle reporting, not token streaming.
+Sources are shared within the medical or education corpus, independently of user
+identity. Uploading adds documents; there is no replacement or deletion route.
+GET on either upload path requires `X-User-ID` and returns document metadata,
+not file contents. Chat messages are history, not RAG source documents.
 
 ## Shared conversations
 
-Owners share a conversation read-only with specific users. `PUT
-/conversations/{conversation_id}/shares` replaces the full recipient list, so it both
-shares and revokes; `{"user_ids": []}` revokes everyone. Recipient IDs use the same
-format as `X-User-ID`, at most 50 per request, and owners cannot list themselves (422).
+Owners grant read-only access to specific user IDs with
+`PUT /conversations/{conversation_id}/shares`:
 
 ```json
 {"user_ids": ["bob", "carol"]}
 ```
 
-Recipients find shared conversations with `GET /shared` and read one with `GET
-/shared/{conversation_id}`, which returns `{"conversation": {...}, "messages": [...]}`
-in the same message format as the owner's history. Sharing grants no write access:
-recipients still receive 404 from `/chat`, `/chat/stream`,
-`/conversations/{conversation_id}/messages`, and the share list. Never shared,
-revoked, and expired conversations all return the same 404. Shares end when the
-conversation expires and are deleted with it.
+This replaces the entire recipient list. Omitted users lose access;
+`{"user_ids":[]}` revokes everyone. A request accepts at most 50 recipient entries
+and cannot include the owner.
 
-Shares are stored in `chat_session_access`, one row per recipient per conversation;
-revoking sets `is_deleted` and sharing again restores the same row. Sharing is by
-user ID only. Link-based sharing would need a token column added to `schema.sql`.
+Recipients use their own `X-User-ID` with `GET /shared` and
+`GET /shared/{conversation_id}`. The detail response contains `conversation` and
+`messages`. Recipients cannot send messages or manage sharing on the owner's chat.
+Public share links are not supported, and access ends when the conversation expires.
 
-### Refreshing shared views
+Shared views receive no push updates. Poll the shared detail route every 15 seconds
+and refresh when `conversation.updated_at` changes.
 
-The API does not push updates. Clients poll `GET /shared/{conversation_id}` every 15
-seconds (FR-06 allows 10-30) and re-render only when `conversation.updated_at` changes;
-it advances when a turn starts and when it finishes. An in-progress question appears
-with `status: "pending"` and its answer arrives on a later poll. Each poll is two
-indexed queries, so no caching is needed at this interval.
+## Health checks
 
-## Errors and verification
+`GET /health` checks process liveness. `GET /health/db` opens a fresh PostgreSQL
+connection and runs `SELECT 1`, returning:
 
-- 422: missing/invalid/duplicate identity header, obsolete fields, or invalid payload.
-- 404: missing resource or resource owned by another user.
-- 409: conversation already generating, or a completion for a superseded turn.
-- 502: generation failed; provider details are not returned.
-- 503: storage or embedding generation unavailable; configured PostgreSQL never silently falls back to memory.
-- File validation retains 400/413 responses with safe error codes.
+| HTTP status | Response |
+| --- | --- |
+| 200 | `{"status":"healthy","database":"connected"}` |
+| 503 | `{"status":"unhealthy","database":"not_configured"}` in memory mode |
+| 503 | `{"status":"unhealthy","database":"unavailable"}` on connection or query failure |
 
-```powershell
-python -B -m pytest tests -p no:cacheprovider
-```
+The database probe uses a five-second connection timeout and a three-second
+statement timeout. It does not verify Vertex AI or every application table.
+If the startup database/schema check fails, the API cannot serve requests;
+inspect startup logs instead.
 
-Tests use mocked generation and clear inherited `DATABASE_URL`. PostgreSQL tests
-require a separate disposable database configured through `TEST_DATABASE_URL`.
+## Errors
 
-## Development boundaries
+| Status | Meaning |
+| --- | --- |
+| 400 | Invalid, unreadable, empty, or unsupported file. |
+| 403 | Missing or invalid developer upload key. |
+| 404 | Missing, unauthorized, revoked, or expired resource. |
+| 409 | Conversation already generating or a superseded turn. |
+| 413 | File exceeds 25 MiB. |
+| 422 | Missing/invalid user header or invalid request payload. |
+| 502 | Answer generation failed. |
+| 503 | Storage/embeddings unavailable, uploads not configured, or database health check failed. |
 
-API routes handle requests and responses; services handle ingestion/generation;
-repository implementations own storage queries. The Database/RAG team owns extraction,
-indexing, and retrieval design. Coordinate changes to those interfaces across subteams.
-Keep secrets in environment configuration and preserve Cloud Run compatibility.
-
-Current request contracts are in `app/user_models.py`; shared legacy response types
-remain in `app/models.py`. Historical request/authentication models in `models.py`
-are not used by these routes and do not create authentication endpoints.
-
-## Retrieval integration and merge checks
-
-API storage methods require a user ID. In PostgreSQL mode, new TXT and PDF uploads are
-embedded once with Vertex AI `gemini-embedding-001` at 768 dimensions using the
-`RETRIEVAL_DOCUMENT` task. The question uses `RETRIEVAL_QUERY`. PostgreSQL ranks
-persisted vectors by exact cosine distance and returns up to three positive matches
-for chat, with ownership enforced in SQL. Existing vectors with another model or
-dimension are preserved and excluded; chunks without embeddings are not searched.
-A positive similarity is a ranking signal, not a guarantee that a passage answers
-the question. An ANN index and relevance-threshold tuning are deferred.
-
-Configure `DATABASE_URL`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION` for
-Cloud SQL and Vertex AI. Use Application Default Credentials locally or the Cloud
-Run service account in deployment, with Vertex AI permission. Cloud SQL connection
-networking and credentials remain the database team's responsibility. The application
-does not provision resources or apply migrations at startup.
-
-`USE_MOCK_CHAT` controls answer generation only. Configuring PostgreSQL activates
-real Vertex AI embedding calls even when mock chat is enabled. The model and vector
-size are pinned together in `app/retrieval/embeddings.py`; changing either requires
-re-embedding chunks. Model errors return a safe 503; there is no silent hash fallback.
-
-Embedding happens before the upload transaction, then original bytes, chunks, and
-vectors are saved together. An embedding or database failure leaves no partial batch.
-Upload responses report `embedding_status=completed` only after commit. PDFs
-without extractable text and DOCX files without text remain `pending` with no chunks.
-Processing is synchronous; large batches may be slow and will need a worker in a
-later sprint.
-
-Without `DATABASE_URL`, the in-memory repository keeps the existing local hash-vector
-path for development. Its data is temporary and its upload status stays pending;
-these hash vectors are not semantic model embeddings. Tests inject fake embeddings
-rather than making Google API calls.
-
-`app/user_models.py` is the canonical source for user-scoped contracts; `app/models.py`
-re-exports these types rather than keeping conflicting legacy definitions.
-
-Run both suites together from the repository root:
-
-```powershell
-python -B -m pytest tests rawberry-api/tests -p no:cacheprovider
-```
-
-The GitHub Actions test workflow exercises both suites with a disposable pgvector
-service and mocked model calls. Local PostgreSQL tests remain opt-in through
-`TEST_DATABASE_URL`. Configure the workflow as a required branch-protection check
-if the team wants failed tests to block merges.
-
-## Retrieval invocation checks (T1AI-49)
-
-With a disposable pgvector database in `TEST_DATABASE_URL`, run both suites from
-the repository root. The PostgreSQL integration tests upload TXT sources, recreate
-the application, and invoke both `/chat` and `/chat/stream`. The SDK is replaced
-with controlled responses, so the tests prove request wiring and database behavior
-without incurring Google charges or judging model answer quality.
-
-The invocation tests check that only the question is embedded after restart,
-selected source passages reach `gemini-2.5-flash`, other users' passages and unrelated
-passages are excluded, and embedding failures leave a failed conversation turn
-without calling the answer model. No-match behavior preserves the existing API:
-the model receives the question and any allowed conversation history/preferences,
-without retrieved document context. It is not forced to abstain or return citations.
-
-For a live team demo after database/Vertex configuration, upload a UTF-8 `.txt`
-file through Swagger with the trusted development user header, confirm its
-`embedding_status` is `completed`, create a conversation, then ask a question about
-that file using the returned conversation ID. Use `USE_MOCK_CHAT=false` for a real
-Gemini answer. PDF/DOCX extraction, historical backfill, and real-model retrieval
-quality evaluation are outside these tests.
-
-## Developer-managed preset chats
-
-Set `DEVELOPER_UPLOAD_API_KEY` to a secret available only to developers or the
-ingestion job. Send it in `X-Developer-Key` on uploads. Missing server configuration
-disables uploads with 503; missing or invalid credentials return 403. Use HTTPS
-and keep this secret out of browser code. No user header is required for uploads.
-
-Each conversation has a fixed `domain` (`medical` or `education`). Create the
-database from `rawberry-db/init/schema.sql`; the application never changes the schema.
-
-Create one conversation per desired preset with `domain: "medical"` or
-`domain: "education"`, then use the same `/chat` or `/chat/stream` endpoint.
-The server retrieves only from that conversation's corpus. Users share sources,
-while their preferences and conversation histories stay private. Domain cannot be
-changed by a chat request; create a new conversation to switch modes.
-
-The shared corpora reuse repository owner filtering with reserved owners
-`corpus:medical` and `corpus:education`; these cannot be used as user identities.
-This works with both in-memory and PostgreSQL storage without duplicating the RAG
-pipeline. Uploading again adds documents; this API does not yet replace or version
-an existing corpus. In-memory uploads disappear at restart; production presets
-require PostgreSQL.
-
+After an SSE stream starts, generation failures arrive as a `failed` event rather
+than a new HTTP error status. Internal database and provider details are not exposed.

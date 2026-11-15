@@ -19,7 +19,7 @@ for the responsibility boundary and current limitations, the
 [run instructions](rawberry-api/run.md) for local Google Cloud configuration.
 ## Requirements
 - Python 3.12+
-
+- And more
 
 Install all project dependencies from the repository root:
 
