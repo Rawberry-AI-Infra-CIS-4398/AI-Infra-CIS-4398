@@ -5,11 +5,11 @@ from uuid import UUID, uuid4
 from fastapi import HTTPException
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.corpora import corpus_owner, require_developer
 from app.models import HealthResponse, RootResponse, UploadErrorResponse, UploadResponse
-from app.repository import Repository
+from app.repository import Repository, StorageError
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 from app.user_context import require_user
@@ -36,7 +36,7 @@ def get_document_service(store: Repository = Depends(get_store)) -> DocumentServ
 @router.get('/', response_model=RootResponse)
 def read_root() -> RootResponse:
     return RootResponse(message='RAWBerry API is running', available_endpoints=[
-        '/health', '/uploadmedical', '/uploadedu', '/chat', '/chat/stream',
+        '/health', '/health/db', '/uploadmedical', '/uploadedu', '/chat', '/chat/stream',
         '/me/system-prompt', '/conversations', '/conversations/{conversation_id}/messages',
         '/conversations/{conversation_id}/shares', '/shared', '/shared/{conversation_id}',
     ])
@@ -45,6 +45,23 @@ def read_root() -> RootResponse:
 @router.get('/health', response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status='healthy')
+
+
+@router.get('/health/db', responses={503: {'description': 'Database unavailable or not configured'}})
+def database_health(store: Repository = Depends(get_store)) -> JSONResponse:
+    """Check a fresh PostgreSQL connection; memory mode is not database health."""
+    from app.postgres_repository import PostgresRepository
+
+    headers = {'Cache-Control': 'no-store'}
+    if not isinstance(store, PostgresRepository):
+        return JSONResponse(status_code=503, headers=headers,
+                            content={'status': 'unhealthy', 'database': 'not_configured'})
+    try:
+        store.check_database_connection()
+    except StorageError:
+        return JSONResponse(status_code=503, headers=headers,
+                            content={'status': 'unhealthy', 'database': 'unavailable'})
+    return JSONResponse(headers=headers, content={'status': 'healthy', 'database': 'connected'})
 
 
 def register_corpus_routes(path: str, domain: str) -> None:

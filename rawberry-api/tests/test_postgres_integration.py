@@ -47,6 +47,13 @@ def database_url(monkeypatch):
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_database_health_with_real_postgres(database_url):
+    with TestClient(create_app(store=PostgresRepository(database_url))) as client:
+        response = client.get('/health/db')
+        assert response.status_code == 200
+        assert response.json() == {'status': 'healthy', 'database': 'connected'}
+
+
 def test_data_survives_application_recreation_and_is_shared(database_url, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("USE_MOCK_CHAT", "true")

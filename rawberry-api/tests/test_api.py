@@ -365,7 +365,7 @@ def test_openapi_exposes_header_on_every_data_endpoint(client):
     schema = client.app.openapi()
     for path, operations in schema['paths'].items():
         for operation in operations.values():
-            if path in ('/', '/health'):
+            if path in ('/', '/health', '/health/db'):
                 continue
             headers = [p for p in operation.get('parameters', []) if p['in'] == 'header']
             assert len(headers) == 1

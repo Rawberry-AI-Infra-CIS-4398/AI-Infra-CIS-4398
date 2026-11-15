@@ -1,5 +1,32 @@
 # Run RAWBerry API
 
+## Quick local launcher (PowerShell)
+
+The repository root contains `run.ps1`. It finds the API directory using its own
+location, uses the root `.venv` Python when available (otherwise `python` on PATH),
+and restores your original directory when the server stops.
+
+From the repository root, install dependencies and start:
+
+```powershell
+.\run.ps1 -InstallDependencies
+```
+
+For later runs, use `.\run.ps1`. From any other directory, invoke the script by
+its relative or absolute path; for this checkout:
+
+```powershell
+& 'C:\Users\wuh71\Downloads\AI-Infra-CIS-4398\run.ps1'
+```
+
+Options: `-Port 8001`, `-BindAddress 127.0.0.1`, and `-NoReload`.
+The script inherits environment variables such as `DATABASE_URL` and
+`USE_MOCK_CHAT`; it does not load `.env` files or deploy to Cloud Run.
+Open <http://127.0.0.1:8000/docs> or <http://127.0.0.1:8000/health/db>.
+The database check returns 503 unless a working PostgreSQL connection is configured.
+The Cloud Run Unix socket path is only available inside the configured Cloud Run
+service; local PostgreSQL connections need a locally reachable database host.
+
 ## 1. Install the Google Cloud CLI
 
 Install the Google Cloud CLI for Windows using the official installer:
