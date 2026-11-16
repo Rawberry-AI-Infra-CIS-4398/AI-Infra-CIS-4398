@@ -62,9 +62,33 @@ def test_every_data_route_requires_user_context(method, path, body):
         assert client.request(method, path, json=body).status_code == 422
 
 
-def test_developer_upload_does_not_require_user_context():
+@pytest.mark.parametrize('path,corpus', [
+    ('/uploadmedical', 'corpus:medical'),
+    ('/uploadedu', 'corpus:education'),
+])
+def test_developer_upload_does_not_require_user_context(path, corpus):
     with TestClient(create_app(store=InMemoryStore())) as client:
-        assert client.post('/uploadedu', headers={'X-Developer-Key': 'test-upload-key'}, files=[('files', ('a.txt', b'hello', 'text/plain'))]).status_code == 200
+        response = client.post(path, headers={'X-Developer-Key': 'test-upload-key'}, files=[('files', ('a.txt', b'hello', 'text/plain'))])
+        assert response.status_code == 200
+        assert len(client.app.state.store.list_documents(corpus)) == 1
+
+
+@pytest.mark.parametrize('path,corpus', [
+    ('/uploadmedical', 'corpus:medical'),
+    ('/uploadedu', 'corpus:education'),
+])
+@pytest.mark.parametrize('headers', [{}, {'X-Developer-Key': 'wrong-key'}])
+def test_corpus_uploads_reject_missing_or_invalid_developer_key(client, path, corpus, headers):
+    response = client.post(path, headers=headers, files=[('files', ('notes.txt', b'private source', 'text/plain'))])
+    assert response.status_code == 403
+    assert client.app.state.store.list_documents(corpus) == []
+
+
+@pytest.mark.parametrize('path', ['/uploadmedical', '/uploadedu'])
+def test_corpus_uploads_are_disabled_without_server_key(client, monkeypatch, path):
+    monkeypatch.delenv('DEVELOPER_UPLOAD_API_KEY')
+    response = client.post(path, headers={'X-Developer-Key': 'test-upload-key'}, files=[('files', ('notes.txt', b'private source', 'text/plain'))])
+    assert response.status_code == 503
 
 
 @pytest.mark.parametrize('identifier', ['', ' ', ' alice', 'alice ', 'a b', 'a' * 129])
@@ -264,11 +288,13 @@ def test_docx_upload_chunks_paragraphs_and_table_rows_in_order(client):
     assert response.status_code == 200
     assert response.json()[0]['chunk_count'] == 1
     store = client.app.state.store
-    chunks = store.list_chunks('alice')
+    chunks = store.list_chunks('corpus:education')
     assert [(c['page_number'], c['text']) for c in chunks] == [(None, 'alpha intro\nName | Score\ngamma | 42')]
-    assert store.get_document_content('alice', response.json()[0]['document_id']) == content
-    # A DOCX with no text is stored but has nothing to search, like a scanned PDF.
-    assert upload(client, make_docx(), name='blank.docx').json()[0]['chunk_count'] == 0
+    assert store.get_document_content('corpus:education', response.json()[0]['document_id']) == content
+    blank = upload(client, make_docx(), name='blank.docx')
+    assert blank.status_code == 400
+    assert blank.json()['error_code'] == 'EMPTY_EXTRACTED_TEXT'
+    assert len(store.list_documents('corpus:education')) == 1
 
 
 def test_long_text_is_split_on_word_boundaries_with_overlap(client):
