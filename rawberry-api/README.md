@@ -60,7 +60,7 @@ reject extra fields; identity belongs in the header, not the body.
 | `GET /health` | Check that the API process is running. |
 | `GET /health/db` | Check connectivity to the configured PostgreSQL database. |
 | `POST /uploadmedical` | Upload source documents to the shared medical RAG corpus. |
-| `POST /uploadedu` | Upload source documents to the shared education RAG corpus. |
+| `POST /uploadedu` | Upload source documents, including education JSON files, to the shared education RAG corpus. |
 | `GET /uploadmedical` | List metadata for medical source documents. |
 | `GET /uploadedu` | List metadata for education source documents. |
 | `GET /me/system-prompt` | Read the current user's response preferences. |
@@ -150,6 +150,48 @@ curl.exe -X POST "http://127.0.0.1:8000/uploadedu" -H "X-Developer-Key: $env:DEV
 Supported files: **PDF, DOCX, and UTF-8 TXT**, up to **25 MiB per file**. Readable
 text is extracted, cleaned, and chunked for retrieval. OCR is not supported.
 Unreadable files or files with no readable text are rejected.
+
+`/uploadedu` also accepts **UTF-8 `.json` files**, with the same developer key,
+multipart `files` field, and 25 MiB limit. Each file contains one source object:
+
+```json
+{
+  "authors": ["Henretta, James A."],
+  "institution": "",
+  "text": ["First paragraph or fragment.", "Next paragraph or fragment."],
+  "citation": "Full bibliographic citation",
+  "title": "America's History, For the AP* Course",
+  "header": "The Perils of War",
+  "date_published": "2014-01-10T05:00:00.000Z",
+  "date_added": "2026-09-13T23:50:21.443Z",
+  "start_page": 188
+}
+```
+
+Only `text` is required: a nonempty array of nonblank strings. Entries are
+paragraphs/fragments, joined in order with paragraph breaks before cleaning,
+chunking, and embedding. Metadata is not embedded as source text.
+
+Other supported fields are optional: `authors` (string array), `institution`
+(string or null), `citation`, `title`, `header`, and `source_id` (strings),
+`date_published` and `date_added` (ISO 8601 timestamps with time zones, or null),
+and `start_page` (positive integer or null). Unknown fields, arrays of source
+objects, malformed JSON, and invalid field types return 400 `INVALID_EDU_JSON`.
+
+Source fields are stored under each document's `metadata.education`, visible
+through `GET /uploadedu`. `date_added` remains a source-supplied date. An empty
+institution becomes null. `start_page` is a source reference; chunk page numbers
+remain null because fragments do not identify page boundaries. Saving citation
+metadata does not automatically add citations to chat answers. Re-uploading adds
+a new document, even if its optional `source_id` matches an existing document.
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/uploadedu" -H "X-Developer-Key: $env:DEVELOPER_UPLOAD_API_KEY" -F "files=@rawberry-api/examples/education-source.json;type=application/json"
+```
+
+Run this example from the repository root. JSON can be mixed with other supported
+file types in a batch; one invalid file rejects the batch. `/uploadmedical`
+continues to accept PDF, DOCX, and TXT only.
 
 Upload responses include document IDs, chunk counts, and `embedding_status`.
 PostgreSQL mode reports `completed` after indexing succeeds; in-memory development
