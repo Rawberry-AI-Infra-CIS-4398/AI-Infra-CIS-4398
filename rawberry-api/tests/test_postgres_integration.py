@@ -58,6 +58,27 @@ def test_database_health_with_real_postgres(database_url):
         assert response.json() == {'status': 'healthy', 'database': 'connected'}
 
 
+def test_education_json_metadata_and_chunks_survive_restart(database_url):
+    record = {'text': ['The Saratoga reference code is MAPLE-188.'],
+              'title': "America's History", 'authors': ['Henretta, James A.'],
+              'citation': 'Example citation', 'start_page': 188}
+    raw = json.dumps(record).encode()
+    with TestClient(create_app(store=PostgresRepository(database_url))) as client:
+        response = client.post('/uploadedu', headers={'X-Developer-Key': 'test-upload-key'},
+                               files=[('files', ('source.json', raw, 'application/json'))])
+        assert response.status_code == 200
+        assert response.json()[0]['embedding_status'] == 'completed'
+        identifier = response.json()[0]['document_id']
+    store = PostgresRepository(database_url)
+    with TestClient(create_app(store=store)) as client:
+        listed = client.get('/uploadedu', headers={'X-User-ID': 'alice'}).json()[0]
+        assert listed['metadata']['education'] == {key: value for key, value in record.items() if key != 'text'}
+        assert store.get_document_content('corpus:education', identifier) == raw
+        chunks = store.search_chunks('corpus:education', 'Saratoga reference code')
+        assert chunks and chunks[0]['text'] == record['text'][0]
+        assert chunks[0]['page_number'] is None
+
+
 def test_data_survives_application_recreation_and_is_shared(database_url, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("USE_MOCK_CHAT", "true")

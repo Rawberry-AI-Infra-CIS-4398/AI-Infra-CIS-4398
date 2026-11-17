@@ -81,7 +81,13 @@ def register_corpus_routes(path: str, domain: str) -> None:
     def get_documents(user_id: User, store: Repository = Depends(get_store)):
         return store.list_documents(corpus_owner(domain))
 
-    @router.post(path, response_model=list[UploadResponse],
+    description = 'Developer-only multipart upload using the files field. Supports PDF, DOCX, and UTF-8 TXT.'
+    if domain == 'education':
+        description += (' Education also accepts UTF-8 .json source objects with a nonempty text array and optional '
+                        'authors, institution, citation, title, header, date_published, date_added, start_page, and source_id. '
+                        'Source metadata is preserved separately from searchable text.')
+
+    @router.post(path, response_model=list[UploadResponse], description=description,
                  dependencies=[Depends(require_developer)], responses={
                      400: {'model': UploadErrorResponse}, 413: {'model': UploadErrorResponse},
                  })
