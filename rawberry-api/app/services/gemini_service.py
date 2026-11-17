@@ -1,4 +1,5 @@
 import os
+from collections.abc import Iterator
 
 from app.config import Settings, get_settings
 
@@ -13,6 +14,11 @@ class MockChatClient:
         if "Use the following document context" in message:
             return message
         return f"You said: {message}"
+
+    def stream_reply(self, message: str, *, system_instruction: str | None = None) -> Iterator[str]:
+        reply = self.generate_reply(message, system_instruction=system_instruction)
+        for offset in range(0, len(reply), 24):
+            yield reply[offset:offset + 24]
 
 # This class handles communication with Gemini through Vertex AI.
 # Currently, a new Google GenAI client is created for each generate_reply()
@@ -76,3 +82,30 @@ class GeminiChatClient:
             if self.settings.use_mock_chat:
                 return MockChatClient().generate_reply(message)
             raise
+
+    def stream_reply(self, message: str, *, system_instruction: str | None = None) -> Iterator[str]:
+        """Forward provider text chunks as they arrive, preserving whitespace."""
+        if not self.should_use_real_client():
+            yield from MockChatClient().stream_reply(message, system_instruction=system_instruction)
+            return
+        if genai is None:
+            raise RuntimeError("google-genai is not installed. Install it from requirements.txt.")
+
+        with genai.Client(
+            vertexai=True,
+            project=self._get_project_id(),
+            location=self.settings.google_cloud_location or "global",
+        ) as client:
+            stream = client.models.generate_content_stream(
+                model=self.settings.gemini_model,
+                contents=message,
+                config={"system_instruction": system_instruction} if system_instruction else None,
+            )
+            try:
+                for chunk in stream:
+                    if chunk.text:
+                        yield chunk.text
+            finally:
+                close = getattr(stream, 'close', None)
+                if close is not None:
+                    close()

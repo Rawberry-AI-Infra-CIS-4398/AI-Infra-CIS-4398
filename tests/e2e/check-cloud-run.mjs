@@ -10,7 +10,6 @@ const required = {
   '/conversations': ['get', 'post'],
   '/conversations/{conversation_id}/messages': ['get'],
   '/chat': ['post'],
-  '/chat/stream': ['post'],
   '/conversations/{conversation_id}/shares': ['get', 'put'],
   '/shared': ['get'],
   '/shared/{conversation_id}': ['get'],

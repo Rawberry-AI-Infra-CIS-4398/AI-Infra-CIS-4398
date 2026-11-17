@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test } from '@playwright/test';
+import { readChatResult } from '../sse.js';
 
 test.use({
   baseURL: 'http://127.0.0.1:8000',
@@ -31,7 +32,7 @@ test('RAWBerry stores a system prompt and shares a transcript with one recipient
   const turn = { conversation_id: id, message: 'What did the Continental Congress do?' };
   const chat = await request.post('/chat', { headers: owner, data: turn });
   await expect(chat).toBeOK();
-  const { reply } = await chat.json();
+  const { reply } = await readChatResult(chat);
   expect(reply).not.toContain(prompt);
 
   const shares = `/conversations/${id}/shares`;

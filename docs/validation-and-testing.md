@@ -34,6 +34,12 @@ cleaning and chunking, persistence, retrieval, conversation and preference
 isolation, and generation/storage recovery. Model and embedding clients are stubbed
 or deterministic; the suite makes no paid model calls.
 
+`POST /chat` always returns SSE progress and answer chunks. The API and Swagger
+checks assemble `delta` events and verify the final `completed` response against
+the saved history. There are no separate `/chat/status` or `/chat/stream` routes.
+The external QuagBot backend must parse this stream before returning its own
+`/api/messages` JSON response; update that integration before running its UI tests.
+
 ## Local QuagBot and API end-to-end tests
 
 This test checks the real QuagBot UI and server routes against a local AI Infra API.

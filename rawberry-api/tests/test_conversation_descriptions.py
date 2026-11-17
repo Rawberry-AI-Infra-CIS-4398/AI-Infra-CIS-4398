@@ -10,11 +10,11 @@ from app.services.chat_service import ChatService
 from app.store import InMemoryStore
 
 
-@pytest.mark.parametrize('endpoint', ['/chat', '/chat/stream'])
-def test_description_appears_after_first_success_and_stays_stable(endpoint):
+def test_description_appears_after_first_success_and_stays_stable():
     store = InMemoryStore()
     llm = MagicMock()
-    llm.generate_reply.return_value = 'Solar panels convert sunlight into electricity.'
+    answer = ['Solar panels convert sunlight into electricity.']
+    llm.stream_reply.side_effect = lambda *args, **kwargs: iter(answer)
     app = create_app(store=store)
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
@@ -22,15 +22,15 @@ def test_description_appears_after_first_success_and_stays_stable(endpoint):
         assert created['description'] is None
         identifier = created['id']
         payload = {'conversation_id': identifier, 'message': 'How do solar panels work?'}
-        assert client.post(endpoint, json=payload).status_code == 200
+        assert client.post('/chat', json=payload).status_code == 200
         saved = client.get('/conversations').json()[0]
         assert saved['title'] == 'Solar energy'
-        assert saved['description'] == describe_exchange(payload['message'], llm.generate_reply.return_value)
+        assert saved['description'] == describe_exchange(payload['message'], answer[0])
         assert client.get('/conversations', headers={'X-User-ID': 'bob'}).json() == []
-        llm.generate_reply.return_value = 'A different answer.'
-        assert client.post(endpoint, json={'conversation_id': identifier, 'message': 'Another topic'}).status_code == 200
+        answer[0] = 'A different answer.'
+        assert client.post('/chat', json={'conversation_id': identifier, 'message': 'Another topic'}).status_code == 200
         assert client.get('/conversations').json()[0]['description'] == saved['description']
-        assert llm.generate_reply.call_count == 2
+        assert llm.stream_reply.call_count == 2
 
 
 def test_failed_turn_does_not_create_description():

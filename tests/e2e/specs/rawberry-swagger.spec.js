@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
+import { readChatResult } from '../sse.js';
 
 test.use({ baseURL: 'http://127.0.0.1:8000', storageState: { cookies: [], origins: [] } });
 
@@ -34,7 +35,9 @@ async function execute(page, method, path, { user, id, body, files, status = 200
   expect(response.status(), `${method} ${path}`).toBe(status);
   await expect(operation.locator('.live-responses-table .response-col_status').last()).toHaveText(new RegExp(`^${status}\\b`));
   await summary.click();
-  return response.json();
+  return method === 'POST' && path === '/chat'
+    ? readChatResult(response)
+    : response.json();
 }
 
 test('Swagger demonstrates prompts, follow-up context, history, and sharing', async ({ page }) => {

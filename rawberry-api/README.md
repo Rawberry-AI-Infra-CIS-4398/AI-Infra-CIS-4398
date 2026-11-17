@@ -68,8 +68,7 @@ reject extra fields; identity belongs in the header, not the body.
 | `POST /conversations` | Create a conversation with a fixed medical or education domain. |
 | `GET /conversations` | List the current user's non-expired conversations. |
 | `GET /conversations/{conversation_id}/messages` | Read the owner's saved conversation messages. |
-| `POST /chat` | Generate an answer and save the exchange, returning the full answer when finished. |
-| `POST /chat/stream` | Generate and save the same exchange while sending progress events, followed by the full answer; does not stream individual words or tokens. |
+| `POST /chat` | Stream progress updates and Gemini answer chunks over SSE, then save the completed exchange. |
 | `PUT /conversations/{conversation_id}/shares` | Replace the users granted read-only access to an owned conversation. |
 | `GET /conversations/{conversation_id}/shares` | List users granted access to an owned conversation. |
 | `GET /shared` | List conversations shared with the current user. |
@@ -87,7 +86,7 @@ Create a conversation with `POST /conversations` and `X-User-ID`:
 ```
 
 `domain` is required (`medical` or `education`) and stays fixed. The title is optional.
-Use the returned `id` in `POST /chat` or `POST /chat/stream` with the same user header:
+Use the returned `id` in `POST /chat` with the same user header:
 
 ```json
 {
@@ -96,13 +95,33 @@ Use the returned `id` in `POST /chat` or `POST /chat/stream` with the same user 
 }
 ```
 
-`/chat` returns `conversation_id`, `turn_id`, and `reply` in one JSON response.
-`/chat/stream` returns SSE `status` events: `received`, `generating`, then
-`completed` or `failed`. The completed event contains the answer in `response.reply`.
-It reports progress, not individual words or tokens. There is no `/chat/status` route.
-Clients must inspect the stream's final event to determine success.
+`/chat` always returns `text/event-stream` (SSE). It sends `status` events:
+`received`, `generating`, then `completed` or `failed`. Between those statuses,
+`delta` events carry answer text as Gemini generates it. Append each `delta` to
+the displayed answer; chunk boundaries may split words and do not necessarily
+match individual tokens.
 
-Both endpoints save the question before generation and the answer on success.
+```text
+event: delta
+data: {"request_id":"...","conversation_id":"...","turn_id":"...","delta":"Hello"}
+
+event: delta
+data: {"request_id":"...","conversation_id":"...","turn_id":"...","delta":" world"}
+
+```
+
+The final `completed` status includes the full saved answer in `response.reply`;
+use it to confirm or replace the assembled text, rather than appending it again.
+On `failed`, any displayed partial text is incomplete and is not saved as an
+assistant reply. A stream ending without either final status is interrupted;
+check history before retrying. The endpoint requires a POST-capable streaming
+client with `X-User-ID`; the browser's native `EventSource` cannot make that POST.
+Existing `/chat/status` and `/chat/stream` clients must switch to `/chat`; those routes have been removed.
+
+Real streaming requires `USE_MOCK_CHAT=false` and a configured Google Cloud project.
+Mock mode emits chunks of its local echo response without calling Gemini.
+
+The endpoint saves the question before generation and the answer on success.
 Failed questions remain in history with `status: "failed"`. History includes
 ordered messages with role, content, turn ID, status, and timestamp.
 
@@ -188,7 +207,6 @@ inspect startup logs instead.
 | 409 | Conversation already generating or a superseded turn. |
 | 413 | File exceeds 25 MiB. |
 | 422 | Missing/invalid user header or invalid request payload. |
-| 502 | Answer generation failed. |
 | 503 | Storage/embeddings unavailable, uploads not configured, or database health check failed. |
 
 After an SSE stream starts, generation failures arrive as a `failed` event rather
