@@ -74,6 +74,13 @@ class ChatStatusEvent(BaseModel):
     response: ChatResponse | None = None
 
 
+class ChatDeltaEvent(BaseModel):
+    request_id: str
+    conversation_id: str
+    turn_id: str
+    delta: str
+
+
 class MessageRecord(BaseModel):
     id: str
     turn_id: str

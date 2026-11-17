@@ -9,13 +9,12 @@ from app.services.chat_service import ChatService
 from app.store import InMemoryStore
 
 
-@pytest.mark.parametrize("stream", [False, True])
-def test_shared_corpora_and_private_conversations(monkeypatch, stream):
+def test_shared_corpora_and_private_conversations(monkeypatch):
     monkeypatch.setenv("DEVELOPER_UPLOAD_API_KEY", "dev-secret")
     store = InMemoryStore()
     app = create_app(store=store)
     llm = MagicMock()
-    llm.generate_reply.return_value = "answer"
+    llm.stream_reply.side_effect = lambda *args, **kwargs: iter(["answer"])
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app) as client:
         for path, text in [("/uploadmedical", b"gamma medical-source"),
@@ -36,9 +35,9 @@ def test_shared_corpora_and_private_conversations(monkeypatch, stream):
                 assert created.json()["domain"] == domain
                 identifier = created.json()["id"]
                 body = {"conversation_id": identifier, "message": "gamma"}
-                path = "/chat/stream" if stream else "/chat"
+                path = "/chat"
                 assert client.post(path, headers=headers, json=body).status_code == 200
-                prompt = llm.generate_reply.call_args.args[0]
+                prompt = llm.stream_reply.call_args.args[0]
                 assert domain + "-source" in prompt
                 other = "education" if domain == "medical" else "medical"
                 assert other + "-source" not in prompt

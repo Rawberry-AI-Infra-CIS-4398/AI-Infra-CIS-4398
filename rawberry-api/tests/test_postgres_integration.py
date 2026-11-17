@@ -16,7 +16,7 @@ from app.postgres_repository import PostgresRepository
 from app.repository import ConversationBusy, ResourceNotFound, StorageError
 from app.retrieval.embeddings import HashEmbeddingProvider
 from pdf_samples import make_pdf
-from test_api import exercise_isolation
+from test_api import chat_result, exercise_isolation
 
 TEXT_PDF = make_pdf('gamma from PDF')
 
@@ -77,7 +77,7 @@ def test_data_survives_application_recreation_and_is_shared(database_url, monkey
         conversation_id = restarted.post('/conversations', json={'domain': 'education', 'title': 'Persistent'}).json()['id']
         chat = restarted.post("/chat", json={"conversation_id": conversation_id, "message": "gamma?"})
         assert chat.status_code == 200
-        assert "alpha beta gamma" in chat.json()["reply"]
+        assert "alpha beta gamma" in chat_result(chat)["reply"]
         assert restarted.app.state.store.get_document_content("corpus:education", documents[1]["id"]) == TEXT_PDF
         assert restarted.put("/me/system-prompt", json={"prompt": ""}).status_code == 200
     with TestClient(create_app(), headers={'X-User-ID': 'alice', 'X-Developer-Key': 'test-upload-key'}) as final:
@@ -121,7 +121,7 @@ def test_uploaded_pdf_is_embedded_and_answers_chat_with_its_page(database_url):
         assert (results[0]['text'], results[0]['page_number']) == ('zebra migration patterns', 2)
         conversation_id = client.post('/conversations', json={'domain': 'education', 'title': 'PDF'}).json()['id']
         chat = client.post('/chat', json={'conversation_id': conversation_id, 'message': 'zebra migration?'})
-        assert 'zebra migration patterns' in chat.json()['reply']
+        assert 'zebra migration patterns' in chat_result(chat)['reply']
     assert repository.search_chunks('bob', 'zebra migration') == []
 
 
@@ -230,8 +230,7 @@ def test_postgres_serializes_conversation_turns_and_recovers_abandoned_work(data
     assert [m['status'] for m in repository.list_messages('alice', identifier)] == ['failed', 'completed', 'completed']
 
 
-@pytest.mark.parametrize('endpoint', ['/chat', '/chat/stream'])
-def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_url, monkeypatch, endpoint):
+def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_url, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -257,6 +256,8 @@ def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_ur
 
     sdk_client.models.embed_content.side_effect = embed
     sdk_client.models.generate_content.return_value = SimpleNamespace(text='The Continental Army won.')
+    sdk_client.models.generate_content_stream.side_effect = lambda **kwargs: iter([
+        SimpleNamespace(text='The Continental Army '), SimpleNamespace(text='won.')])
     store = PostgresRepository(database_url, embeddings=VertexEmbeddingProvider(settings))
     with TestClient(create_app(store=store), headers={'X-User-ID': 'alice'}) as client:
         for owner, text in [('alice', selected), ('alice', irrelevant), ('bob', private)]:
@@ -273,25 +274,23 @@ def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_ur
     app.dependency_overrides[get_chat_service] = lambda: ChatService(restarted, settings=settings)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
         identifier = client.post('/conversations', json={'domain': 'education', 'title': 'History'}).json()['id']
-        response = client.post(endpoint, json={'conversation_id': identifier, 'message': question})
+        response = client.post('/chat', json={'conversation_id': identifier, 'message': question})
         assert response.status_code == 200
-        if endpoint == '/chat':
-            assert response.json()['reply'] == 'The Continental Army won.'
-        else:
-            assert '"status":"completed"' in response.text
-            assert 'The Continental Army won.' in response.text
+        assert '"status":"completed"' in response.text
+        assert 'The Continental Army won.' in response.text
         history = client.get(f'/conversations/{identifier}/messages').json()
         assert [entry['status'] for entry in history] == ['completed', 'completed']
 
     sdk_client.models.embed_content.assert_called_once()
     assert sdk_client.models.embed_content.call_args.kwargs['config']['task_type'] == 'RETRIEVAL_QUERY'
-    generation = sdk_client.models.generate_content.call_args.kwargs
+    generate = sdk_client.models.generate_content_stream
+    generation = generate.call_args.kwargs
     assert generation['model'] == 'gemini-2.5-flash'
     assert selected in generation['contents']
     assert question in generation['contents']
     assert irrelevant not in generation['contents']
     assert private not in generation['contents']
-    sdk_client.models.generate_content.assert_called_once()
+    generate.assert_called_once()
 
 
 def test_no_match_does_not_inject_another_users_sources(database_url):
@@ -306,21 +305,20 @@ def test_no_match_does_not_inject_another_users_sources(database_url):
         {'chunk_index': 0, 'text': 'BOB CONFIDENTIAL PAYROLL NUMBERS'},
     ])])
     llm = MagicMock()
-    llm.generate_reply.return_value = 'A response without source context.'
+    llm.stream_reply.side_effect = lambda *args, **kwargs: iter(['A response without source context.'])
     app = create_app(store=store)
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
         identifier = client.post('/conversations', json={'domain': 'education'}).json()['id']
         response = client.post('/chat', json={'conversation_id': identifier, 'message': 'PAYROLL'})
         assert response.status_code == 200
-        assert response.json()['reply'] == 'A response without source context.'
+        assert chat_result(response)['reply'] == 'A response without source context.'
     # Preserve the current no-match contract: generation receives the question
     # without claiming any retrieved evidence; it is not forced to abstain.
-    llm.generate_reply.assert_called_once_with('PAYROLL', system_instruction=None)
+    llm.stream_reply.assert_called_once_with('PAYROLL', system_instruction=None)
 
 
-@pytest.mark.parametrize('endpoint', ['/chat', '/chat/stream'])
-def test_query_embedding_failure_records_failed_turn_without_generation(database_url, endpoint):
+def test_query_embedding_failure_records_failed_turn_without_generation(database_url):
     from unittest.mock import MagicMock
 
     from app.api.routes import get_chat_service
@@ -334,17 +332,14 @@ def test_query_embedding_failure_records_failed_turn_without_generation(database
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
         identifier = client.post('/conversations', json={'domain': 'education'}).json()['id']
-        response = client.post(endpoint, json={'conversation_id': identifier, 'message': 'question'})
-        if endpoint == '/chat':
-            assert response.status_code == 503
-            assert response.json()['error_code'] == 'STORAGE_UNAVAILABLE'
-        else:
-            assert response.status_code == 200
-            assert '"status":"failed"' in response.text
+        response = client.post('/chat', json={'conversation_id': identifier, 'message': 'question'})
+        assert response.status_code == 200
+        assert '"status":"failed"' in response.text
         assert 'sensitive provider details' not in response.text
         history = client.get(f'/conversations/{identifier}/messages').json()
         assert len(history) == 1 and history[0]['status'] == 'failed'
     llm.generate_reply.assert_not_called()
+    llm.stream_reply.assert_not_called()
 
 
 def test_postgres_sharing_is_read_only_revocable_and_expires(database_url):
