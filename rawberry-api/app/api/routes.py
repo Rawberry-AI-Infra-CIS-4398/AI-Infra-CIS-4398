@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
-from fastapi import APIRouter, Depends, File, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
@@ -14,7 +14,7 @@ from app.repository import Repository, StorageError
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 from app.user_context import require_user
-from app.user_models import (ChatDeltaEvent, ChatRequest, ChatResponse, ChatStatusEvent, ConversationRecord,
+from app.user_models import (ChatDeltaEvent, ChatDomain, ChatRequest, ChatResponse, ChatStatusEvent, ConversationRecord,
                              ConversationRequest, DocumentRecord, MessageRecord, ShareRequest, ShareResponse, SharedConversation,
                              SystemPromptRequest, SystemPromptResponse)
 
@@ -48,7 +48,7 @@ def get_document_service(store: Repository = Depends(get_store)) -> DocumentServ
 @router.get('/', response_model=RootResponse)
 def read_root() -> RootResponse:
     return RootResponse(message='RAWBerry API is running', available_endpoints=[
-        '/health', '/health/db', '/uploadmedical', '/uploadedu', '/chat',
+        '/health', '/health/db', '/upload', '/uploadmedical', '/uploadedu', '/chat',
         '/me/system-prompt', '/conversations', '/conversations/{conversation_id}/messages',
         '/conversations/{conversation_id}/shares', '/shared', '/shared/{conversation_id}',
     ])
@@ -100,6 +100,25 @@ def register_corpus_routes(path: str, domain: str) -> None:
 
 register_corpus_routes('/uploadmedical', 'medical')
 register_corpus_routes('/uploadedu', 'education')
+
+
+# User uploads go through the same ingestion as the corpora, scoped to X-User-ID and the
+# frontend's domain; chats only search the user's uploads from their own domain.
+@router.get('/upload', response_model=list[DocumentRecord])
+def get_user_documents(domain: ChatDomain, user_id: User, store: Repository = Depends(get_store)):
+    return store.list_documents(user_id, domain)
+
+
+@router.post('/upload', response_model=list[UploadResponse], responses={
+    400: {'model': UploadErrorResponse}, 413: {'model': UploadErrorResponse},
+})
+def upload_user_document(
+    user_id: User,
+    domain: Annotated[ChatDomain, Form()],
+    files: Annotated[list[UploadFile], File(..., json_schema_extra={'items': {'type': 'string', 'format': 'binary'}})],
+    service: DocumentService = Depends(get_document_service),
+):
+    return service.upload_document(user_id, files, domain)
 
 
 @router.get('/me/system-prompt', response_model=SystemPromptResponse)

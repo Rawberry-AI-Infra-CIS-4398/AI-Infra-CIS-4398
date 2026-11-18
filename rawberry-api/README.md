@@ -29,7 +29,7 @@ Set environment variables before starting the API; `.env` files are not loaded a
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string. Without it, storage is in memory and disappears on restart; separate processes do not share data. |
-| `DEVELOPER_UPLOAD_API_KEY` | Secret required for document uploads. Uploads are disabled if unset. |
+| `DEVELOPER_UPLOAD_API_KEY` | Secret required for shared corpus uploads. Developer uploads are disabled if unset. |
 | `USE_MOCK_CHAT` | Defaults to `true`. Set to `false` for real Gemini answers. |
 | `GOOGLE_CLOUD_PROJECT` | Google Cloud project for Vertex AI. |
 | `GOOGLE_CLOUD_LOCATION` | Vertex AI location; defaults to `global`. |
@@ -61,6 +61,8 @@ reject extra fields; identity belongs in the header, not the body.
 | `GET /health/db` | Check connectivity to the configured PostgreSQL database. |
 | `POST /uploadmedical` | Upload source documents to the shared medical RAG corpus. |
 | `POST /uploadedu` | Upload source documents, including education JSON files, to the shared education RAG corpus. |
+| `POST /upload` | Upload personal PDF, DOCX, or TXT files; requires `X-User-ID` and multipart `domain` (`medical` or `education`). |
+| `GET /upload` | List the current user's document metadata; requires `X-User-ID` and query parameter `domain` (`medical` or `education`). |
 | `GET /uploadmedical` | List metadata for medical source documents. |
 | `GET /uploadedu` | List metadata for education source documents. |
 | `GET /me/system-prompt` | Read the current user's response preferences. |
@@ -138,6 +140,16 @@ shared corpus. Set response preferences using `PUT /me/system-prompt` with
 apply to subsequent turns across the user's conversations.
 
 ## Document uploads
+
+Users upload personal files through `POST /upload` with `X-User-ID`, a required
+multipart `domain` field (`medical` or `education`), and one or more `files`.
+List those files with `GET /upload?domain=education` (or `medical`) using the
+same user header. Both methods use the same path; no `/documents` endpoint is exposed.
+Personal uploads accept PDF, DOCX, and TXT. Chat searches the conversation's
+shared corpus and that user's personal uploads in the same domain, then uses
+the top three matches overall. Other users' uploads and other domains are excluded.
+Existing personal documents without a domain tag are excluded from these domain-filtered
+lists and searches; re-upload them with the appropriate domain. No schema migration is required.
 
 Developers upload sources through `POST /uploadmedical` or `POST /uploadedu` using
 `X-Developer-Key`. Send multipart form data under `files`, repeating that field for

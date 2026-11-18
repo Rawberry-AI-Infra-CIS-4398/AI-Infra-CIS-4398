@@ -116,7 +116,7 @@ def test_identity_is_case_sensitive_and_not_numeric(client):
 
 def test_removed_identity_fields_and_old_contract_rejected(client):
     assert client.post('/chat', json={'userid': 42, 'data': {'window': 1, 'agent': 'test'}, 'message': 'hello'}).status_code == 422
-    assert client.post('/upload', files=[('files', ('a.txt', b'hello', 'text/plain'))]).status_code == 404
+    assert client.post('/upload', files=[('files', ('a.txt', b'hello', 'text/plain'))]).status_code == 422
     assert client.put('/me/system-prompt', json={'prompt': 'hello', 'user_id': 'bob'}).status_code == 422
     assert client.get('/users/bob/system-prompt').status_code == 404
     assert client.get('/uploadedu?user_id=bob').status_code == 422
@@ -427,4 +427,4 @@ def test_upload_chunks_reach_stage_one_retrieval(client, monkeypatch):
     assert response.status_code == 200
     assert 'The moon orbits Earth every 27 days.' in chat_result(response)['reply']
     assert 'Answer in one sentence.' not in chat_result(response)['reply']  # mock echoes only message content
-    assert owners == ['corpus:education']
+    assert owners == ['corpus:education', 'alice']
