@@ -82,8 +82,8 @@ def register_corpus_routes(path: str, domain: str) -> None:
         return store.list_documents(corpus_owner(domain))
 
     description = 'Developer-only multipart upload using the files field. Supports PDF, DOCX, and UTF-8 TXT.'
-    if domain == 'education':
-        description += (' Education also accepts UTF-8 .json source objects with a nonempty text array and optional '
+    if domain in ('education', 'medical'):
+        description += (' Also accepts UTF-8 .json source objects with a nonempty text array and optional '
                         'authors, institution, citation, title, header, date_published, date_added, start_page, and source_id. '
                         'Source metadata is preserved separately from searchable text.')
 

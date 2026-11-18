@@ -1,4 +1,7 @@
-"""Validate education source records without indexing their JSON metadata as text."""
+"""Shared education/medical source validation without indexing metadata as text.
+
+Education-named symbols are retained for compatibility; both corpora use this schema.
+"""
 from typing import Annotated
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationError, field_validator
