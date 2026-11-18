@@ -6,6 +6,8 @@ from uuid import uuid4
 from fastapi import HTTPException, UploadFile, status
 
 from app import ingestion
+from app.corpora import corpus_owner
+from app.edu_json import InvalidEducationJson, parse_education_json
 
 from app.ingestion import (
     InvalidFileContent,
@@ -19,7 +21,7 @@ from app.models import UploadResponse
 from app.user_models import DocumentRecord
 from app.repository import Repository
 
-# TXT, PDF and DOCX text is chunked here; PostgreSQL embeds chunks on save.
+# Extracted text is chunked here; PostgreSQL embeds chunks on save.
 class DocumentService:
     MAX_FILE_SIZE_BYTES = ingestion.MAX_FILE_SIZE_BYTES
     ALLOWED_EXTENSIONS = ingestion.ALLOWED_EXTENSIONS
@@ -68,17 +70,21 @@ class DocumentService:
             )
 
         # Validate and extract every file before saving any, so one bad file rejects the batch.
-        validated_files: list[tuple[str, str, bytes, list[tuple[int | None, str]]]] = []
+        allowed_extensions = set(self.ALLOWED_EXTENSIONS)
+        if user_id == corpus_owner('education'):
+            allowed_extensions.add('.json')
+        validated_files: list[tuple[str, str, bytes, list[tuple[int | None, str]], dict]] = []
         for uploaded_file in files:
             filename = uploaded_file.filename or "upload.bin"
             ext = os.path.splitext(filename)[1].lower()
-            if ext not in self.ALLOWED_EXTENSIONS:
+            if ext not in allowed_extensions:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={
                         "success": False,
                         "error_code": "INVALID_FILE_TYPE",
-                        "message": "Only PDF, DOCX, and TXT files are supported.",
+                        "message": ("Supported files: PDF, DOCX, TXT, and education JSON."
+                                    if '.json' in allowed_extensions else "Only PDF, DOCX, and TXT files are supported."),
                     },
                 )
 
@@ -94,12 +100,30 @@ class DocumentService:
                     detail={"success": False, "error_code": "FILE_TOO_LARGE", "message": "File exceeds 25MB limit."},
                 )
 
-            validated_files.append((filename, ext, raw_bytes, self._extract_pages(ext, raw_bytes)))
+            source_metadata = {}
+            if ext == '.json':
+                try:
+                    pages, education = parse_education_json(raw_bytes)
+                    source_metadata = {'education': education}
+                except UnicodeDecodeError as exc:
+                    raise HTTPException(400, detail={
+                        'success': False, 'error_code': 'INVALID_TEXT_ENCODING',
+                        'message': 'JSON files must use UTF-8 encoding.',
+                    }) from exc
+                except InvalidEducationJson as exc:
+                    raise HTTPException(400, detail={
+                        'success': False, 'error_code': 'INVALID_EDU_JSON',
+                        'message': ('Expected one education JSON object with a nonempty text array of nonblank strings '
+                                    'and valid source metadata. See the upload documentation for supported fields.'),
+                    }) from exc
+            else:
+                pages = self._extract_pages(ext, raw_bytes)
+            validated_files.append((filename, ext, raw_bytes, pages, source_metadata))
 
         responses: list[UploadResponse] = []
         documents: list[tuple[dict, bytes, list[dict]]] = []
         
-        for filename, ext, raw_bytes, pages in validated_files:
+        for filename, ext, raw_bytes, pages, source_metadata in validated_files:
             document_id = str(uuid4())
 
             try:
@@ -129,6 +153,7 @@ class DocumentService:
                 embedding_status="pending",
                 
                 metadata={
+                    **source_metadata,
                     "source": "upload_endpoint",
                     "cleaning": cleaning_metadata,
                 },

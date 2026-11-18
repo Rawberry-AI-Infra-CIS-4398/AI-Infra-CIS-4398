@@ -1,24 +1,36 @@
-import asyncio
+import anyio
 from typing import Annotated
 from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
 from fastapi import APIRouter, Depends, File, Request, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
 from app.corpora import corpus_owner, require_developer
 from app.models import HealthResponse, RootResponse, UploadErrorResponse, UploadResponse
-from app.repository import Repository
+from app.repository import Repository, StorageError
 from app.services.chat_service import ChatService
 from app.services.document_service import DocumentService
 from app.user_context import require_user
-from app.user_models import (ChatRequest, ChatResponse, ChatStatusEvent, ConversationRecord,
+from app.user_models import (ChatDeltaEvent, ChatRequest, ChatResponse, ChatStatusEvent, ConversationRecord,
                              ConversationRequest, DocumentRecord, MessageRecord, ShareRequest, ShareResponse, SharedConversation,
                              SystemPromptRequest, SystemPromptResponse)
 
 router = APIRouter()
 User = Annotated[str, Depends(require_user)]
+
+
+class _ChatStreamingResponse(StreamingResponse):
+    async def __call__(self, scope, receive, send):
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # Ensure generator cleanup runs even if sending to a disconnected
+            # client fails while the generator is suspended at a yield.
+            with anyio.CancelScope(shield=True):
+                await self.body_iterator.aclose()
 
 
 def get_store(request: Request) -> Repository:
@@ -47,12 +59,35 @@ def health() -> HealthResponse:
     return HealthResponse(status='healthy')
 
 
+@router.get('/health/db', responses={503: {'description': 'Database unavailable or not configured'}})
+def database_health(store: Repository = Depends(get_store)) -> JSONResponse:
+    """Check a fresh PostgreSQL connection; memory mode is not database health."""
+    from app.postgres_repository import PostgresRepository
+
+    headers = {'Cache-Control': 'no-store'}
+    if not isinstance(store, PostgresRepository):
+        return JSONResponse(status_code=503, headers=headers,
+                            content={'status': 'unhealthy', 'database': 'not_configured'})
+    try:
+        store.check_database_connection()
+    except StorageError:
+        return JSONResponse(status_code=503, headers=headers,
+                            content={'status': 'unhealthy', 'database': 'unavailable'})
+    return JSONResponse(headers=headers, content={'status': 'healthy', 'database': 'connected'})
+
+
 def register_corpus_routes(path: str, domain: str) -> None:
     @router.get(path, response_model=list[DocumentRecord])
     def get_documents(user_id: User, store: Repository = Depends(get_store)):
         return store.list_documents(corpus_owner(domain))
 
-    @router.post(path, response_model=list[UploadResponse],
+    description = 'Developer-only multipart upload using the files field. Supports PDF, DOCX, and UTF-8 TXT.'
+    if domain == 'education':
+        description += (' Education also accepts UTF-8 .json source objects with a nonempty text array and optional '
+                        'authors, institution, citation, title, header, date_published, date_added, start_page, and source_id. '
+                        'Source metadata is preserved separately from searchable text.')
+
+    @router.post(path, response_model=list[UploadResponse], description=description,
                  dependencies=[Depends(require_developer)], responses={
                      400: {'model': UploadErrorResponse}, 413: {'model': UploadErrorResponse},
                  })
@@ -111,32 +146,51 @@ def list_messages(conversation_id: UUID, user_id: User, store: Repository = Depe
     return store.list_messages(user_id, str(conversation_id))
 
 
-@router.post('/chat', response_model=ChatResponse)
-def chat(request: ChatRequest, user_id: User, service: ChatService = Depends(get_chat_service)):
-    return service.generate_reply(user_id, request)
-
-
-@router.post('/chat/stream', response_class=StreamingResponse,
+@router.post('/chat', response_class=StreamingResponse,
              responses={200: {'content': {'text/event-stream': {}}}})
-def chat_stream(request: ChatRequest, user_id: User, service: ChatService = Depends(get_chat_service)):
-    # Verify ownership and reserve the turn before committing the HTTP 200 stream.
+def chat(request: ChatRequest, user_id: User, service: ChatService = Depends(get_chat_service)):
+    """Stream progress status and incremental Gemini answer text over SSE.
+
+    Append each delta event to the displayed answer. The completed status contains
+    the full saved reply; failed marks an incomplete answer. Requires an owned
+    conversation and X-User-ID. The response is always text/event-stream.
+    """
     turn = service.prepare_turn(user_id, request)
     request_id = str(uuid4())
 
     async def events():
-        for status, message in [('received', 'Your message was received.'), ('generating', 'Generating a response.')]:
-            yield _format_status_event(ChatStatusEvent(request_id=request_id, status=status, message=message))
+        # Run each blocking provider step in a worker and explicitly close the
+        # iterator on disconnect, including when no model chunk was requested.
+        stream = service.stream_reply(user_id, request, turn)
+        started = False
+        completed = False
+        parts = []
         try:
-            response = await asyncio.to_thread(service.generate_reply, user_id, request, turn)
-        except Exception:
-            yield _format_status_event(ChatStatusEvent(request_id=request_id, status='failed',
-                                                       message='The response could not be generated.'))
-            return
-        yield _format_status_event(ChatStatusEvent(request_id=request_id, status='completed',
-                                                   message='Response complete.', response=response))
+            for status, message in [('received', 'Your message was received.'), ('generating', 'Generating a response.')]:
+                yield _format_status_event(ChatStatusEvent(request_id=request_id, status=status, message=message))
+            try:
+                started = True
+                async for delta in iterate_in_threadpool(stream):
+                    parts.append(delta)
+                    event = ChatDeltaEvent(request_id=request_id, conversation_id=str(request.conversation_id),
+                                           turn_id=turn['id'], delta=delta)
+                    yield f'event: delta\ndata: {event.model_dump_json()}\n\n'
+            except Exception:
+                yield _format_status_event(ChatStatusEvent(request_id=request_id, status='failed',
+                                                           message='The response could not be generated.'))
+                return
+            completed = True
+            response = ChatResponse(conversation_id=str(request.conversation_id), turn_id=turn['id'], reply=''.join(parts))
+            yield _format_status_event(ChatStatusEvent(request_id=request_id, status='completed',
+                                                       message='Response complete.', response=response))
+        finally:
+            with anyio.CancelScope(shield=True):
+                await run_in_threadpool(stream.close)
+                if not started and not completed:
+                    await run_in_threadpool(service.fail_turn, user_id, request, turn)
 
-    return StreamingResponse(events(), media_type='text/event-stream',
-                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+    return _ChatStreamingResponse(events(), media_type='text/event-stream',
+                                  headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
 
 
 def _format_status_event(event: ChatStatusEvent) -> str:

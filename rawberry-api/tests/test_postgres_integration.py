@@ -4,19 +4,23 @@ Tests create/drop an isolated schema and enable the vector extension if needed.
 They never read DATABASE_URL, preventing accidental use of an application database.
 """
 
+import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.routes import get_chat_service
 from app.main import create_app
 from app.postgres_repository import PostgresRepository
 from app.repository import ConversationBusy, ResourceNotFound, StorageError
 from app.retrieval.embeddings import HashEmbeddingProvider
+from app.services.chat_service import ChatService
 from pdf_samples import make_pdf
-from test_api import exercise_isolation
+from test_api import ask, chat_result, conversation, exercise_isolation
 
 TEXT_PDF = make_pdf('gamma from PDF')
 
@@ -47,6 +51,34 @@ def database_url(monkeypatch):
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
+def test_database_health_with_real_postgres(database_url):
+    with TestClient(create_app(store=PostgresRepository(database_url))) as client:
+        response = client.get('/health/db')
+        assert response.status_code == 200
+        assert response.json() == {'status': 'healthy', 'database': 'connected'}
+
+
+def test_education_json_metadata_and_chunks_survive_restart(database_url):
+    record = {'text': ['The Saratoga reference code is MAPLE-188.'],
+              'title': "America's History", 'authors': ['Henretta, James A.'],
+              'citation': 'Example citation', 'start_page': 188}
+    raw = json.dumps(record).encode()
+    with TestClient(create_app(store=PostgresRepository(database_url))) as client:
+        response = client.post('/uploadedu', headers={'X-Developer-Key': 'test-upload-key'},
+                               files=[('files', ('source.json', raw, 'application/json'))])
+        assert response.status_code == 200
+        assert response.json()[0]['embedding_status'] == 'completed'
+        identifier = response.json()[0]['document_id']
+    store = PostgresRepository(database_url)
+    with TestClient(create_app(store=store)) as client:
+        listed = client.get('/uploadedu', headers={'X-User-ID': 'alice'}).json()[0]
+        assert listed['metadata']['education'] == {key: value for key, value in record.items() if key != 'text'}
+        assert store.get_document_content('corpus:education', identifier) == raw
+        chunks = store.search_chunks('corpus:education', 'Saratoga reference code')
+        assert chunks and chunks[0]['text'] == record['text'][0]
+        assert chunks[0]['page_number'] is None
+
+
 def test_data_survives_application_recreation_and_is_shared(database_url, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", database_url)
     monkeypatch.setenv("USE_MOCK_CHAT", "true")
@@ -70,7 +102,7 @@ def test_data_survives_application_recreation_and_is_shared(database_url, monkey
         conversation_id = restarted.post('/conversations', json={'domain': 'education', 'title': 'Persistent'}).json()['id']
         chat = restarted.post("/chat", json={"conversation_id": conversation_id, "message": "gamma?"})
         assert chat.status_code == 200
-        assert "alpha beta gamma" in chat.json()["reply"]
+        assert "alpha beta gamma" in chat_result(chat)["reply"]
         assert restarted.app.state.store.get_document_content("corpus:education", documents[1]["id"]) == TEXT_PDF
         assert restarted.put("/me/system-prompt", json={"prompt": ""}).status_code == 200
     with TestClient(create_app(), headers={'X-User-ID': 'alice', 'X-Developer-Key': 'test-upload-key'}) as final:
@@ -114,7 +146,7 @@ def test_uploaded_pdf_is_embedded_and_answers_chat_with_its_page(database_url):
         assert (results[0]['text'], results[0]['page_number']) == ('zebra migration patterns', 2)
         conversation_id = client.post('/conversations', json={'domain': 'education', 'title': 'PDF'}).json()['id']
         chat = client.post('/chat', json={'conversation_id': conversation_id, 'message': 'zebra migration?'})
-        assert 'zebra migration patterns' in chat.json()['reply']
+        assert 'zebra migration patterns' in chat_result(chat)['reply']
     assert repository.search_chunks('bob', 'zebra migration') == []
 
 
@@ -148,6 +180,47 @@ def test_invalid_api_batch_writes_nothing(database_url):
 
 def test_postgres_isolation_and_conversations(database_url):
     exercise_isolation(PostgresRepository(database_url))
+
+
+@pytest.mark.parametrize('padding,expected_turns', [(0, 10), (3000, 3)])
+def test_model_context_is_bounded_while_postgres_history_stays_complete(database_url, padding, expected_turns):
+    store = PostgresRepository(database_url)
+    app = create_app(store=store)
+    model = MagicMock()
+    model.stream_reply.side_effect = lambda *args, **kwargs: iter(['Recorded answer'])
+    app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=model)
+    messages = [f'Prior question {index} ' + 'x' * padding for index in range(12)]
+    messages = [message.rstrip() for message in messages]
+    preference = 'Keep responses brief.'
+
+    with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
+        identifier = conversation(client)
+        assert client.put('/me/system-prompt', json={'prompt': preference}).status_code == 200
+        for message in messages:
+            assert ask(client, identifier, message).status_code == 200
+        model.stream_reply.side_effect = RuntimeError('Test model failure')
+        failed = ask(client, identifier, 'Failed question')
+        assert failed.status_code == 200
+        assert '"status":"failed"' in failed.text
+        model.stream_reply.side_effect = lambda *args, **kwargs: iter(['Recorded answer'])
+
+        assert ask(client, identifier, 'Current question').status_code == 200
+        prompt, = model.stream_reply.call_args.args
+        context, current = prompt.split('\nCurrent message:\n')
+        assert current == 'Current question'
+        assert [json.loads(line) for line in context.splitlines()[1:]] == [
+            {'user': message, 'assistant': 'Recorded answer'} for message in messages[-expected_turns:]
+        ]
+        assert model.stream_reply.call_args.kwargs == {'system_instruction': preference}
+        assert preference not in prompt
+
+        history = client.get(f'/conversations/{identifier}/messages')
+        assert history.status_code == 200
+        assert [(entry['content'], entry['status']) for entry in history.json() if entry['role'] == 'user'] == [
+            *((message, 'completed') for message in messages),
+            ('Failed question', 'failed'),
+            ('Current question', 'completed'),
+        ]
 
 
 def test_pgvector_persists_ranks_and_filters_owners_and_models(database_url):
@@ -223,8 +296,7 @@ def test_postgres_serializes_conversation_turns_and_recovers_abandoned_work(data
     assert [m['status'] for m in repository.list_messages('alice', identifier)] == ['failed', 'completed', 'completed']
 
 
-@pytest.mark.parametrize('endpoint', ['/chat', '/chat/stream'])
-def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_url, monkeypatch, endpoint):
+def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_url, monkeypatch):
     from types import SimpleNamespace
     from unittest.mock import MagicMock
 
@@ -250,6 +322,8 @@ def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_ur
 
     sdk_client.models.embed_content.side_effect = embed
     sdk_client.models.generate_content.return_value = SimpleNamespace(text='The Continental Army won.')
+    sdk_client.models.generate_content_stream.side_effect = lambda **kwargs: iter([
+        SimpleNamespace(text='The Continental Army '), SimpleNamespace(text='won.')])
     store = PostgresRepository(database_url, embeddings=VertexEmbeddingProvider(settings))
     with TestClient(create_app(store=store), headers={'X-User-ID': 'alice'}) as client:
         for owner, text in [('alice', selected), ('alice', irrelevant), ('bob', private)]:
@@ -266,25 +340,23 @@ def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_ur
     app.dependency_overrides[get_chat_service] = lambda: ChatService(restarted, settings=settings)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
         identifier = client.post('/conversations', json={'domain': 'education', 'title': 'History'}).json()['id']
-        response = client.post(endpoint, json={'conversation_id': identifier, 'message': question})
+        response = client.post('/chat', json={'conversation_id': identifier, 'message': question})
         assert response.status_code == 200
-        if endpoint == '/chat':
-            assert response.json()['reply'] == 'The Continental Army won.'
-        else:
-            assert '"status":"completed"' in response.text
-            assert 'The Continental Army won.' in response.text
+        assert '"status":"completed"' in response.text
+        assert 'The Continental Army won.' in response.text
         history = client.get(f'/conversations/{identifier}/messages').json()
         assert [entry['status'] for entry in history] == ['completed', 'completed']
 
     sdk_client.models.embed_content.assert_called_once()
     assert sdk_client.models.embed_content.call_args.kwargs['config']['task_type'] == 'RETRIEVAL_QUERY'
-    generation = sdk_client.models.generate_content.call_args.kwargs
+    generate = sdk_client.models.generate_content_stream
+    generation = generate.call_args.kwargs
     assert generation['model'] == 'gemini-2.5-flash'
     assert selected in generation['contents']
     assert question in generation['contents']
     assert irrelevant not in generation['contents']
     assert private not in generation['contents']
-    sdk_client.models.generate_content.assert_called_once()
+    generate.assert_called_once()
 
 
 def test_no_match_does_not_inject_another_users_sources(database_url):
@@ -299,21 +371,20 @@ def test_no_match_does_not_inject_another_users_sources(database_url):
         {'chunk_index': 0, 'text': 'BOB CONFIDENTIAL PAYROLL NUMBERS'},
     ])])
     llm = MagicMock()
-    llm.generate_reply.return_value = 'A response without source context.'
+    llm.stream_reply.side_effect = lambda *args, **kwargs: iter(['A response without source context.'])
     app = create_app(store=store)
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
         identifier = client.post('/conversations', json={'domain': 'education'}).json()['id']
         response = client.post('/chat', json={'conversation_id': identifier, 'message': 'PAYROLL'})
         assert response.status_code == 200
-        assert response.json()['reply'] == 'A response without source context.'
+        assert chat_result(response)['reply'] == 'A response without source context.'
     # Preserve the current no-match contract: generation receives the question
     # without claiming any retrieved evidence; it is not forced to abstain.
-    llm.generate_reply.assert_called_once_with('PAYROLL', system_instruction=None)
+    llm.stream_reply.assert_called_once_with('PAYROLL', system_instruction=None)
 
 
-@pytest.mark.parametrize('endpoint', ['/chat', '/chat/stream'])
-def test_query_embedding_failure_records_failed_turn_without_generation(database_url, endpoint):
+def test_query_embedding_failure_records_failed_turn_without_generation(database_url):
     from unittest.mock import MagicMock
 
     from app.api.routes import get_chat_service
@@ -327,17 +398,14 @@ def test_query_embedding_failure_records_failed_turn_without_generation(database
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
         identifier = client.post('/conversations', json={'domain': 'education'}).json()['id']
-        response = client.post(endpoint, json={'conversation_id': identifier, 'message': 'question'})
-        if endpoint == '/chat':
-            assert response.status_code == 503
-            assert response.json()['error_code'] == 'STORAGE_UNAVAILABLE'
-        else:
-            assert response.status_code == 200
-            assert '"status":"failed"' in response.text
+        response = client.post('/chat', json={'conversation_id': identifier, 'message': 'question'})
+        assert response.status_code == 200
+        assert '"status":"failed"' in response.text
         assert 'sensitive provider details' not in response.text
         history = client.get(f'/conversations/{identifier}/messages').json()
         assert len(history) == 1 and history[0]['status'] == 'failed'
     llm.generate_reply.assert_not_called()
+    llm.stream_reply.assert_not_called()
 
 
 def test_postgres_sharing_is_read_only_revocable_and_expires(database_url):

@@ -43,7 +43,7 @@ def test_recipient_cannot_write_or_use_owner_routes(client):
     identifier = conversation(client)
     share(client, identifier, ['bob'])
     assert ask(client, identifier, user='bob').status_code == 404
-    assert ask(client, identifier, user='bob', stream=True).status_code == 404
+    assert ask(client, identifier, user='bob').status_code == 404
     assert client.get(f'/conversations/{identifier}/messages', headers={'X-User-ID': 'bob'}).status_code == 404
     # Recipients can't see or change who else has access.
     assert client.get(f'/conversations/{identifier}/shares', headers={'X-User-ID': 'bob'}).status_code == 404

@@ -25,7 +25,7 @@ def test_expiration_boundary_and_api_enforcement(monkeypatch, age, expired):
     store.finish_turn('alice', identifier, turn['id'], 'Original answer')
     monkeypatch.setattr(store, '_now', lambda: started + age)
     llm = MagicMock()
-    llm.generate_reply.return_value = 'New answer'
+    llm.stream_reply.side_effect = lambda *args, **kwargs: iter(['New answer'])
     app = create_app(store=store)
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
@@ -34,12 +34,12 @@ def test_expiration_boundary_and_api_enforcement(monkeypatch, age, expired):
         assert client.get(f'/conversations/{identifier}/messages').status_code == (404 if expired else 200)
         # Reading never extends retention.
         assert store._conversations[identifier]['updated_at'] == started
-        for endpoint in ['/chat', '/chat/stream']:
+        for endpoint in ['/chat']:
             response = client.post(endpoint, json={'conversation_id': identifier, 'message': 'Follow up'})
             assert response.status_code == (404 if expired else 200)
         assert client.get(f'/conversations/{identifier}/messages', headers={'X-User-ID': 'bob'}).status_code == 404
     if expired:
-        llm.generate_reply.assert_not_called()
+        llm.stream_reply.assert_not_called()
         assert len(store._turns[identifier]) == 1  # expired chats cannot be revived
 
 
