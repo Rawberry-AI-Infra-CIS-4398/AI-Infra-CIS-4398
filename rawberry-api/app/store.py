@@ -34,9 +34,10 @@ class InMemoryStore:
                 self._chunks.extend({**chunk, 'document_id': document['id']} for chunk in chunks)
         return [document['embedding_status'] for document, _, _ in prepared]
 
-    def list_documents(self, user_id: str) -> list[dict[str, Any]]:
+    def list_documents(self, user_id: str, domain: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
-            return deepcopy([d for d in self._documents if d.get('user_id') == user_id])
+            return deepcopy([d for d in self._documents if d.get('user_id') == user_id
+                             and (domain is None or (d.get('metadata') or {}).get('domain') == domain)])
 
     def get_document_content(self, user_id: str, document_id: str) -> bytes:
         with self._lock:
@@ -49,8 +50,12 @@ class InMemoryStore:
             document_ids = {d['id'] for d in self.list_documents(user_id)}
             return deepcopy([c for c in self._chunks if c['document_id'] in document_ids])
 
-    def search_chunks(self, user_id: str, query: str, limit: int = 3) -> list[dict[str, Any]]:
-        return search_owned_chunks(user_id, self.list_chunks(user_id), query, limit)
+    def search_chunks(self, user_id: str, query: str, limit: int = 3, domain: str | None = None) -> list[dict[str, Any]]:
+        chunks = self.list_chunks(user_id)
+        if domain is not None:
+            document_ids = {d['id'] for d in self.list_documents(user_id, domain)}
+            chunks = [c for c in chunks if c['document_id'] in document_ids]
+        return search_owned_chunks(user_id, chunks, query, limit)
 
     def get_system_prompt(self, user_id: str) -> str:
         with self._lock:

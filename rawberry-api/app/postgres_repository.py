@@ -108,12 +108,14 @@ class PostgresRepository:
         # The connection context commits before the caller can report indexing success.
         return statuses
 
-    def list_documents(self, user_id: str) -> list[dict[str, Any]]:
+    def list_documents(self, user_id: str, domain: str | None = None) -> list[dict[str, Any]]:
         with self._connection() as connection:
             return connection.execute(
                 "SELECT d.public_id::text AS id, d.filename, d.file_type, d.size_bytes, d.user_id, "
                 "d.embedding_status, d.metadata, (SELECT count(*) FROM chunk c WHERE c.doc_id = d.id) AS chunk_count "
-                "FROM document d WHERE d.user_id = %s AND d.public_id IS NOT NULL ORDER BY d.uploaded_at, d.id", (user_id,)
+                "FROM document d WHERE d.user_id = %s AND d.public_id IS NOT NULL "
+                "AND (%s::text IS NULL OR d.metadata->>'domain' = %s) ORDER BY d.uploaded_at, d.id",
+                (user_id, domain, domain),
             ).fetchall()
 
     def get_document_content(self, user_id: str, document_id: str) -> bytes:
@@ -135,7 +137,7 @@ class PostgresRepository:
                 "WHERE d.user_id = %s AND d.public_id IS NOT NULL ORDER BY d.uploaded_at, d.id, c.chunk_index", (user_id,)
             ).fetchall()
 
-    def search_chunks(self, user_id: str, query: str, limit: int = 3) -> list[dict[str, Any]]:
+    def search_chunks(self, user_id: str, query: str, limit: int = 3, domain: str | None = None) -> list[dict[str, Any]]:
         """Embed only the question and rank this user's compatible stored vectors."""
         if not user_id or not query.strip() or limit <= 0:
             return []
@@ -151,11 +153,12 @@ class PostgresRepository:
                 "CASE WHEN vector_dims(e.vector) = %s THEN e.vector <=> %s::vector END AS distance "
                 "FROM embedding e JOIN chunk c ON c.id = e.chunk_id "
                 "JOIN document d ON d.id = c.doc_id "
-                "WHERE d.user_id = %s AND d.public_id IS NOT NULL AND e.model = %s) "
+                "WHERE d.user_id = %s AND d.public_id IS NOT NULL AND e.model = %s "
+                "AND (%s::text IS NULL OR d.metadata->>'domain' = %s)) "
                 "SELECT document_id, chunk_index, page_number, text, status, "
                 "LEAST(1.0, 1.0 - distance) AS similarity FROM matches "
                 "WHERE distance < 1.0 ORDER BY distance, chunk_id LIMIT %s",
-                (EMBEDDING_DIMENSIONS, vector, user_id, EMBEDDING_MODEL, limit),
+                (EMBEDDING_DIMENSIONS, vector, user_id, EMBEDDING_MODEL, domain, domain, limit),
             ).fetchall()
 
     def get_system_prompt(self, user_id: str) -> str:

@@ -62,7 +62,8 @@ class DocumentService:
                 },
             ) from exc
 
-    def upload_document(self, user_id: str, files: list[UploadFile]) -> list[UploadResponse]:
+    def upload_document(self, user_id: str, files: list[UploadFile], domain: str | None = None) -> list[UploadResponse]:
+        # domain tags user uploads so each frontend's chats only search its own app's files.
         if not files:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -156,6 +157,7 @@ class DocumentService:
                     **source_metadata,
                     "source": "upload_endpoint",
                     "cleaning": cleaning_metadata,
+                    **({"domain": domain} if domain else {}),
                 },
 
             )
