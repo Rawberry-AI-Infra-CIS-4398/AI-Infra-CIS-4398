@@ -124,10 +124,12 @@ def test_stream_uses_domain_history_and_separate_preferences(setup, monkeypatch)
     first = store.start_turn('alice', body['conversation_id'], 'Prior question')
     store.finish_turn('alice', body['conversation_id'], first['id'], 'Prior answer')
     store.set_system_prompt('alice', 'Be concise')
-    search = MagicMock(return_value=[{'text': 'Education context'}])
+    search = MagicMock(return_value=[{'text': 'Education context', 'similarity': 0.9}])
     monkeypatch.setattr(store, 'search_chunks', search)
     client.post('/chat', json=body)
-    search.assert_called_once_with('corpus:education', 'hello', limit=3)
+    assert search.call_count == 2
+    search.assert_any_call('corpus:education', 'hello', limit=3)
+    search.assert_any_call('alice', 'hello', limit=3, domain='education')
     prompt = llm.stream_reply.call_args.args[0]
     assert all(text in prompt for text in ['Prior question', 'Prior answer', 'Education context', 'hello'])
     assert 'Be concise' not in prompt

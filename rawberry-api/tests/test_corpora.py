@@ -47,7 +47,7 @@ def test_shared_corpora_and_private_conversations(monkeypatch):
         assert client.post("/conversations", headers={"X-User-ID": "corpus:medical"}, json={"domain": "medical"}).status_code == 422
         # User uploads exist but, like every user endpoint, require X-User-ID.
         assert client.post("/upload").status_code == 422
-        assert client.get("/documents").status_code == 422
+        assert client.get("/upload").status_code == 422
 
 
 def test_user_uploads_are_private_and_domain_scoped():
@@ -58,13 +58,16 @@ def test_user_uploads_are_private_and_domain_scoped():
     app.dependency_overrides[get_chat_service] = lambda: ChatService(store, llm_client=llm)
     with TestClient(app) as client:
         alice = {"X-User-ID": "alice"}
+        assert client.get('/upload', headers=alice).status_code == 422
+        assert client.get('/upload', headers=alice, params={'domain': 'unknown'}).status_code == 422
+        assert client.get('/documents', headers=alice).status_code == 404
         files = [("files", ("notes.txt", b"gamma alice-medical-upload", "text/plain"))]
         assert client.post("/upload", headers=alice, files=files).status_code == 422
         assert client.post("/upload", headers=alice, files=files, data={"domain": "unknown"}).status_code == 422
         assert client.post("/upload", headers=alice, files=files, data={"domain": "medical"}).status_code == 200
-        assert len(client.get("/documents", headers=alice, params={"domain": "medical"}).json()) == 1
-        assert client.get("/documents", headers=alice, params={"domain": "education"}).json() == []
-        assert client.get("/documents", headers={"X-User-ID": "bob"}, params={"domain": "medical"}).json() == []
+        assert len(client.get("/upload", headers=alice, params={"domain": "medical"}).json()) == 1
+        assert client.get("/upload", headers=alice, params={"domain": "education"}).json() == []
+        assert client.get("/upload", headers={"X-User-ID": "bob"}, params={"domain": "medical"}).json() == []
         assert client.get("/uploadmedical", headers=alice).json() == []
         for user, domain, visible in [("alice", "medical", True), ("alice", "education", False),
                                       ("bob", "medical", False)]:

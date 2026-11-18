@@ -48,7 +48,7 @@ def get_document_service(store: Repository = Depends(get_store)) -> DocumentServ
 @router.get('/', response_model=RootResponse)
 def read_root() -> RootResponse:
     return RootResponse(message='RAWBerry API is running', available_endpoints=[
-        '/health', '/upload', '/documents', '/uploadmedical', '/uploadedu', '/chat', '/chat/stream',
+        '/health', '/health/db', '/upload', '/uploadmedical', '/uploadedu', '/chat',
         '/me/system-prompt', '/conversations', '/conversations/{conversation_id}/messages',
         '/conversations/{conversation_id}/shares', '/shared', '/shared/{conversation_id}',
     ])
@@ -104,7 +104,7 @@ register_corpus_routes('/uploadedu', 'education')
 
 # User uploads go through the same ingestion as the corpora, scoped to X-User-ID and the
 # frontend's domain; chats only search the user's uploads from their own domain.
-@router.get('/documents', response_model=list[DocumentRecord])
+@router.get('/upload', response_model=list[DocumentRecord])
 def get_user_documents(domain: ChatDomain, user_id: User, store: Repository = Depends(get_store)):
     return store.list_documents(user_id, domain)
 

@@ -74,7 +74,7 @@ def test_search_uses_query_embeddings_and_safe_sql_parameters(monkeypatch):
     statement, parameters = connection.execute.call_args.args
     assert owner not in statement
     assert 'd.user_id = %s' in statement
-    assert parameters[2:] == (owner, EMBEDDING_MODEL, 2)
+    assert parameters[2:] == (owner, EMBEDDING_MODEL, None, None, 2)
     provider.embed_query.assert_called_once_with('question')
     provider.embed_document.assert_not_called()
     provider.reset_mock()

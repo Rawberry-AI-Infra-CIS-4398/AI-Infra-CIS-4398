@@ -427,4 +427,4 @@ def test_upload_chunks_reach_stage_one_retrieval(client, monkeypatch):
     assert response.status_code == 200
     assert 'The moon orbits Earth every 27 days.' in chat_result(response)['reply']
     assert 'Answer in one sentence.' not in chat_result(response)['reply']  # mock echoes only message content
-    assert owners == ['corpus:education']
+    assert owners == ['corpus:education', 'alice']

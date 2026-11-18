@@ -28,7 +28,12 @@ def test_load_documents_reads_supported_files_with_original_bytes():
     assert "sample-plain-1kb.txt" in paths
     for path, raw_bytes, pages in documents:
         assert raw_bytes == Path(path).read_bytes()
-        assert pages == [(None, raw_bytes.decode("utf-8"))]
+        if Path(path).suffix.lower() == '.txt':
+            assert pages == [(None, raw_bytes.decode("utf-8"))]
+        elif Path(path).suffix.lower() == '.pdf':
+            assert pages
+            assert [number for number, _ in pages] == list(range(1, len(pages) + 1))
+            assert any(text.strip() for _, text in pages)
 
 
 def test_load_documents_rejects_missing_or_empty_directory(tmp_path):
