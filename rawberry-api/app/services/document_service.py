@@ -72,7 +72,9 @@ class DocumentService:
 
         # Validate and extract every file before saving any, so one bad file rejects the batch.
         allowed_extensions = set(self.ALLOWED_EXTENSIONS)
-        if user_id == corpus_owner('education'):
+        source_domain = next((name for name in ('education', 'medical')
+                              if user_id == corpus_owner(name)), None)
+        if source_domain:
             allowed_extensions.add('.json')
         validated_files: list[tuple[str, str, bytes, list[tuple[int | None, str]], dict]] = []
         for uploaded_file in files:
@@ -84,7 +86,7 @@ class DocumentService:
                     detail={
                         "success": False,
                         "error_code": "INVALID_FILE_TYPE",
-                        "message": ("Supported files: PDF, DOCX, TXT, and education JSON."
+                        "message": ("Supported files: PDF, DOCX, TXT, and source JSON."
                                     if '.json' in allowed_extensions else "Only PDF, DOCX, and TXT files are supported."),
                     },
                 )
@@ -104,8 +106,8 @@ class DocumentService:
             source_metadata = {}
             if ext == '.json':
                 try:
-                    pages, education = parse_education_json(raw_bytes)
-                    source_metadata = {'education': education}
+                    pages, source = parse_education_json(raw_bytes)
+                    source_metadata = {source_domain: source}
                 except UnicodeDecodeError as exc:
                     raise HTTPException(400, detail={
                         'success': False, 'error_code': 'INVALID_TEXT_ENCODING',
@@ -113,8 +115,8 @@ class DocumentService:
                     }) from exc
                 except InvalidEducationJson as exc:
                     raise HTTPException(400, detail={
-                        'success': False, 'error_code': 'INVALID_EDU_JSON',
-                        'message': ('Expected one education JSON object with a nonempty text array of nonblank strings '
+                        'success': False, 'error_code': ('INVALID_MEDICAL_JSON' if source_domain == 'medical' else 'INVALID_EDU_JSON'),
+                        'message': ('Expected one source JSON object with a nonempty text array of nonblank strings '
                                     'and valid source metadata. See the upload documentation for supported fields.'),
                     }) from exc
             else:

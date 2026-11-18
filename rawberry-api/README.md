@@ -59,7 +59,7 @@ reject extra fields; identity belongs in the header, not the body.
 | `GET /` | Return the API status message and endpoint list. |
 | `GET /health` | Check that the API process is running. |
 | `GET /health/db` | Check connectivity to the configured PostgreSQL database. |
-| `POST /uploadmedical` | Upload source documents to the shared medical RAG corpus. |
+| `POST /uploadmedical` | Upload source documents, including source JSON files, to the shared medical RAG corpus. |
 | `POST /uploadedu` | Upload source documents, including education JSON files, to the shared education RAG corpus. |
 | `POST /upload` | Upload personal PDF, DOCX, or TXT files; requires `X-User-ID` and multipart `domain` (`medical` or `education`). |
 | `GET /upload` | List the current user's document metadata; requires `X-User-ID` and query parameter `domain` (`medical` or `education`). |
@@ -163,7 +163,7 @@ Supported files: **PDF, DOCX, and UTF-8 TXT**, up to **25 MiB per file**. Readab
 text is extracted, cleaned, and chunked for retrieval. OCR is not supported.
 Unreadable files or files with no readable text are rejected.
 
-`/uploadedu` also accepts **UTF-8 `.json` files**, with the same developer key,
+`/uploadedu` and `/uploadmedical` also accept **UTF-8 `.json` files**, with the same developer key,
 multipart `files` field, and 25 MiB limit. Each file contains one source object:
 
 ```json
@@ -188,10 +188,12 @@ Other supported fields are optional: `authors` (string array), `institution`
 (string or null), `citation`, `title`, `header`, and `source_id` (strings),
 `date_published` and `date_added` (ISO 8601 timestamps with time zones, or null),
 and `start_page` (positive integer or null). Unknown fields, arrays of source
-objects, malformed JSON, and invalid field types return 400 `INVALID_EDU_JSON`.
+objects, malformed JSON, and invalid field types return 400 `INVALID_EDU_JSON`
+for education or `INVALID_MEDICAL_JSON` for medical.
 
-Source fields are stored under each document's `metadata.education`, visible
-through `GET /uploadedu`. `date_added` remains a source-supplied date. An empty
+Source fields are stored under each document's `metadata.education` or
+`metadata.medical`, visible through GET on the corresponding upload path.
+`date_added` remains a source-supplied date. An empty
 institution becomes null. `start_page` is a source reference; chunk page numbers
 remain null because fragments do not identify page boundaries. Saving citation
 metadata does not automatically add citations to chat answers. Re-uploading adds
@@ -202,7 +204,8 @@ curl.exe -X POST "http://127.0.0.1:8000/uploadedu" -H "X-Developer-Key: $env:DEV
 ```
 
 Run this example from the repository root. JSON can be mixed with other supported
-file types in a batch; one invalid file rejects the batch. `/uploadmedical`
+file types in a batch; one invalid file rejects the batch. Both developer upload
+paths accept PDF, DOCX, TXT, and the same source JSON structure. Personal `/upload`
 continues to accept PDF, DOCX, and TXT only.
 
 Upload responses include document IDs, chunk counts, and `embedding_status`.
