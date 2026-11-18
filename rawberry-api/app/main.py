@@ -1,4 +1,5 @@
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -10,6 +11,8 @@ from app.config import get_settings
 from app.repository import ConversationBusy, Repository, ResourceNotFound, StorageError
 from app.services.chat_service import GenerationError
 from app.store import InMemoryStore
+
+logger = logging.getLogger(__name__)
 
 
 # Create the FastAPI app, shared store, and routes.
@@ -46,6 +49,7 @@ def create_app(store: Repository | None = None) -> FastAPI:
 
     @app.exception_handler(StorageError)
     async def storage_exception_handler(request: Request, exc: StorageError) -> JSONResponse:
+        logger.error("Storage operation failed", exc_info=exc)
         return JSONResponse(status_code=503, content={
             "success": False,
             "error_code": "STORAGE_UNAVAILABLE",
