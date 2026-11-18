@@ -19,6 +19,7 @@ from app.user_models import DocumentRecord
 USER_ID_PATTERN = re.compile(r"^[!-~]{1,128}$")
 
 
+
 #updated later to fit final format from front end team
 def load_documents(doc_path="testdocs"):
     print(f"loading all documents from directory {doc_path}...")

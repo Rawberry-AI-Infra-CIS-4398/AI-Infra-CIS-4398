@@ -31,8 +31,11 @@ class ChatService:
         conversation_id = str(request.conversation_id)
         turn = turn if turn is not None else self.prepare_turn(user_id, request)
         try:
-            # Retrieval uses the conversation's fixed shared corpus, never the user's uploads.
-            chunks = self.store.search_chunks(corpus_owner(turn['domain']), request.message, limit=3)
+            # Retrieval combines the conversation's shared corpus with the user's own uploads;
+            # the best matches across both win, so the corpus answers even when the user uploaded nothing.
+            chunks = (self.store.search_chunks(corpus_owner(turn['domain']), request.message, limit=3)
+                      + self.store.search_chunks(user_id, request.message, limit=3))
+            chunks = sorted(chunks, key=lambda chunk: chunk['similarity'], reverse=True)[:3]
             preferences = self.store.get_system_prompt(user_id)
             message = request.message
             # Only retrieved source passages enter document context; history is added separately below.

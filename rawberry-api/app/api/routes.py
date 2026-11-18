@@ -36,7 +36,7 @@ def get_document_service(store: Repository = Depends(get_store)) -> DocumentServ
 @router.get('/', response_model=RootResponse)
 def read_root() -> RootResponse:
     return RootResponse(message='RAWBerry API is running', available_endpoints=[
-        '/health', '/uploadmedical', '/uploadedu', '/chat', '/chat/stream',
+        '/health', '/upload', '/documents', '/uploadmedical', '/uploadedu', '/chat', '/chat/stream',
         '/me/system-prompt', '/conversations', '/conversations/{conversation_id}/messages',
         '/conversations/{conversation_id}/shares', '/shared', '/shared/{conversation_id}',
     ])
@@ -65,6 +65,23 @@ def register_corpus_routes(path: str, domain: str) -> None:
 
 register_corpus_routes('/uploadmedical', 'medical')
 register_corpus_routes('/uploadedu', 'education')
+
+
+# User uploads go through the same ingestion as the corpora, scoped to X-User-ID.
+@router.get('/documents', response_model=list[DocumentRecord])
+def get_user_documents(user_id: User, store: Repository = Depends(get_store)):
+    return store.list_documents(user_id)
+
+
+@router.post('/upload', response_model=list[UploadResponse], responses={
+    400: {'model': UploadErrorResponse}, 413: {'model': UploadErrorResponse},
+})
+def upload_user_document(
+    user_id: User,
+    files: Annotated[list[UploadFile], File(..., json_schema_extra={'items': {'type': 'string', 'format': 'binary'}})],
+    service: DocumentService = Depends(get_document_service),
+):
+    return service.upload_document(user_id, files)
 
 
 @router.get('/me/system-prompt', response_model=SystemPromptResponse)
