@@ -83,8 +83,11 @@ class ChatService:
         return ChatResponse(conversation_id=conversation_id, turn_id=turn['id'], reply=reply)
 
     def _generation_input(self, user_id: str, request: ChatRequest, turn: dict) -> tuple[str, str | None]:
-        # Retrieval uses the conversation's fixed shared corpus, never the user's uploads.
-        chunks = self.store.search_chunks(corpus_owner(turn['domain']), request.message, limit=3)
+        # Retrieval combines the conversation's shared corpus with the user's own uploads from the same
+        # domain; the best matches across both win, so the corpus still answers when the user uploaded nothing.
+        chunks = (self.store.search_chunks(corpus_owner(turn['domain']), request.message, limit=3)
+                  + self.store.search_chunks(user_id, request.message, limit=3, domain=turn['domain']))
+        chunks = sorted(chunks, key=lambda chunk: chunk['similarity'], reverse=True)[:3]
         preferences = self.store.get_system_prompt(user_id)
         message = request.message
         # Only retrieved source passages enter document context; history is added separately below.
