@@ -239,6 +239,13 @@ class PostgresRepository:
                 (user_id, CONVERSATION_TTL_SECONDS),
             ).fetchall()
 
+    def delete_conversation(self, user_id: str, conversation_id: str) -> None:
+        with self._connection() as connection:
+            session_id = self._owned_conversation(connection, user_id, conversation_id)
+            # Foreign keys cascade to turns, legacy messages/citations, and
+            # sharing access. The row lock serializes deletion with turn writes.
+            connection.execute('DELETE FROM chat_session WHERE id = %s', (session_id,))
+
     @staticmethod
     def _owned_conversation(connection, user_id: str, conversation_id: str):
         row = connection.execute(

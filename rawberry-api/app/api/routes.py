@@ -4,7 +4,7 @@ from uuid import UUID, uuid4
 
 from fastapi import HTTPException
 
-from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, Response, UploadFile
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool, run_in_threadpool
 
@@ -49,7 +49,7 @@ def get_document_service(store: Repository = Depends(get_store)) -> DocumentServ
 def read_root() -> RootResponse:
     return RootResponse(message='RAWBerry API is running', available_endpoints=[
         '/health', '/health/db', '/upload', '/uploadmedical', '/uploadedu', '/chat',
-        '/me/system-prompt', '/conversations', '/conversations/{conversation_id}/messages',
+        '/me/system-prompt', '/conversations', '/conversations/{conversation_id}', '/conversations/{conversation_id}/messages',
         '/conversations/{conversation_id}/shares', '/shared', '/shared/{conversation_id}',
     ])
 
@@ -149,6 +149,19 @@ def create_conversation(request: ConversationRequest, user_id: User, store: Repo
 @router.get('/conversations', response_model=list[ConversationRecord])
 def list_conversations(user_id: User, store: Repository = Depends(get_store)):
     return store.list_conversations(user_id)
+
+
+@router.delete('/conversations/{conversation_id}', status_code=204, response_class=Response,
+               responses={404: {'description': 'Conversation missing, expired, or not owned by this user'}})
+def delete_conversation(conversation_id: UUID, user_id: User, store: Repository = Depends(get_store)):
+    """Permanently delete an owned conversation, its messages, and sharing access.
+
+    Supply the owner's X-User-ID header. Uploaded documents and user preferences
+    are preserved. Deletion is allowed during generation; late results cannot
+    restore the conversation. Success returns 204 with no response body.
+    """
+    store.delete_conversation(user_id, str(conversation_id))
+    return Response(status_code=204)
 
 
 @router.get('/conversations/{conversation_id}/messages', response_model=list[MessageRecord])
