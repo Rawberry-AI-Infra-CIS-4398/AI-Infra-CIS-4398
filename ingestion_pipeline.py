@@ -1,23 +1,23 @@
 import argparse
+import hashlib
 import os
-import re
+import sys
 from uuid import uuid4
-
-from app.ingestion import prepare_document
-from app.services.document_cleaner import EmptyExtractedText
-
 
 # app resolves to rawberry-api/app through the repository-level app package
 from app.config import get_settings
-# the /upload endpoint uses the same file rules, extraction and chunking
+from app.corpora import corpus_owner
+# the /upload endpoint uses the same file rules, extraction, cleaning and chunking
 from app.ingestion import (ALLOWED_EXTENSIONS, MAX_FILE_SIZE_BYTES, InvalidFileContent,
-                           UnreadableDocument, extract_pages, split_pages)
+                           UnreadableDocument, extract_pages, prepare_document)
 from app.postgres_repository import PostgresRepository
+from app.services.document_cleaner import EmptyExtractedText
 from app.user_models import DocumentRecord
 
-# same owner rule as the user_id CHECK constraint in rawberry-db/init/schema.sql
-USER_ID_PATTERN = re.compile(r"^[!-~]{1,128}$")
-
+# developer sources are seeded into one of the shared corpora, never a user's uploads
+DOMAINS = ("medical", "education")
+# frontend-provided sources live in rawberry-db/sources/<domain>/{pdfs,json}; only pdfs is read here
+SOURCES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rawberry-db", "sources")
 
 
 #updated later to fit final format from front end team
@@ -63,14 +63,8 @@ def load_documents(doc_path="testdocs"):
     return documents
 
 
-def split_documents(pages, document_id):
-    print("Splitting documents into chunks...")
-    # 900 char chunks with 100 char overlap, split page by page so every chunk keeps its page number
-    return split_pages(pages, document_id)
+def ingest_document(repository, user_id, path, raw_bytes, pages, domain=None):
 
-
-def ingest_document(repository, user_id, path, raw_bytes, pages):
- 
     document_id = str(uuid4())
 
     try:
@@ -90,11 +84,14 @@ def ingest_document(repository, user_id, path, raw_bytes, pages):
         size_bytes=len(raw_bytes),
         chunk_count=len(chunks),
         embedding_status="pending",
-        
+
         metadata={
             "source": "ingestion_pipeline",
             "path": path,
+            # lets a re-run recognise files that were already seeded
+            "sha256": hashlib.sha256(raw_bytes).hexdigest(),
             "cleaning": cleaning_metadata,
+            **({"domain": domain} if domain else {}),
         },
 
     )
@@ -106,18 +103,55 @@ def ingest_document(repository, user_id, path, raw_bytes, pages):
     return document_id
 
 
+def seed_corpus(repository, domain, documents):
+    """Ingest each document into the domain's corpus; return (ingested, skipped, failed) filenames."""
+    owner = corpus_owner(domain)
+    # each file commits on its own, so after a crash a re-run only adds what is missing
+    existing = repository.list_documents(owner)
+    seen_hashes = {(d.get("metadata") or {}).get("sha256") for d in existing}
+    seen_names = {d["filename"] for d in existing}
+
+    ingested, skipped, failed = [], [], []
+    for path, raw_bytes, pages in documents:
+        filename = os.path.basename(path)
+        digest = hashlib.sha256(raw_bytes).hexdigest()
+        if digest in seen_hashes:
+            print(f"Skipping {filename}, already seeded in {owner}")
+            skipped.append(filename)
+            continue
+        if filename in seen_names:
+            print(f"Skipping {filename}, a different file with this name is already in {owner}; rename it to seed both")
+            skipped.append(filename)
+            continue
+        try:
+            document_id = ingest_document(repository, owner, path, raw_bytes, pages, domain)
+        except Exception as exc:
+            # one Vertex or database error shouldn't stop the remaining files
+            print(f"Failed to ingest {filename}: {type(exc).__name__}: {exc}")
+            failed.append(filename)
+            continue
+        if document_id is None:
+            skipped.append(filename)
+            continue
+        seen_hashes.add(digest)
+        seen_names.add(filename)
+        ingested.append(filename)
+    return ingested, skipped, failed
+
+
 def main():
     from dotenv import load_dotenv
     load_dotenv()
 
-    parser = argparse.ArgumentParser(description="Load, chunk, and embed documents into the RAWBerry database.")
-    parser.add_argument("--doc-path", default="testdocs")
-    parser.add_argument("--user-id", default=os.getenv("INGEST_USER_ID"),
-                        help="owner of the documents, the same value the API receives as X-User-ID")
+    parser = argparse.ArgumentParser(description="Load, chunk, and embed developer sources into a RAWBerry corpus.")
+    parser.add_argument("--domain", choices=DOMAINS, default=os.getenv("INGEST_DOMAIN"),
+                        help="corpus to seed; chats with the same domain search these sources")
+    parser.add_argument("--doc-path", help="folder to read; defaults to rawberry-db/sources/<domain>/pdfs")
     args = parser.parse_args()
 
-    if not args.user_id or not USER_ID_PATTERN.match(args.user_id):
-        parser.error("--user-id (or INGEST_USER_ID) must be 1-128 printable ASCII characters with no spaces")
+    if args.domain not in DOMAINS:
+        parser.error(f"--domain (or INGEST_DOMAIN) must be one of: {', '.join(DOMAINS)}")
+    doc_path = args.doc_path or os.path.join(SOURCES_DIR, args.domain, "pdfs")
     database_url = os.getenv("DATABASE_URL", "").strip()
     if not database_url:
         parser.error("DATABASE_URL must be set")
@@ -129,9 +163,13 @@ def main():
     repository.check_ready()
 
     #loading documents
-    documents = load_documents(doc_path=args.doc_path)
-    for path, raw_bytes, pages in documents:
-        ingest_document(repository, args.user_id, path, raw_bytes, pages)
+    documents = load_documents(doc_path=doc_path)
+    ingested, skipped, failed = seed_corpus(repository, args.domain, documents)
+
+    print(f"\nSeeded {corpus_owner(args.domain)}: {len(ingested)} ingested, {len(skipped)} skipped, {len(failed)} failed")
+    if failed:
+        print("Failed files (safe to re-run; already seeded files are skipped): " + ", ".join(failed))
+        sys.exit(1)
 
 
 # ensures that this file only runs when it is ran directly not when imported by another file

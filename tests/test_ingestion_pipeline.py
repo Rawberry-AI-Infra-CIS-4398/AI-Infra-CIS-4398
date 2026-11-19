@@ -1,11 +1,11 @@
 """Ingestion output must match the contract the upload endpoint persists."""
 
-from importlib.resources import path
 from pathlib import Path
 
 import pytest
 
 import ingestion_pipeline
+from app.ingestion import split_pages
 from app.store import InMemoryStore
 from app.user_models import DocumentRecord
 
@@ -58,7 +58,7 @@ def test_load_documents_reads_docx_and_skips_files_upload_rejects(tmp_path, monk
 
 def test_split_documents_keeps_contiguous_indexes_and_page_numbers():
     pages = [(1, "alpha " * 400), (2, "   "), (3, "beta " * 50)]
-    chunks = ingestion_pipeline.split_documents(pages, "doc-1")
+    chunks = split_pages(pages, "doc-1")
     assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
     assert all(0 < len(c.text) <= 900 for c in chunks)
     assert {c.page_number for c in chunks} == {1, 3}
@@ -93,3 +93,35 @@ def test_ingest_document_without_text_writes_nothing():
     store = RecordingStore()
     assert ingestion_pipeline.ingest_document(store, "alice", "blank.pdf", b"%PDF-", [(1, "")]) is None
     assert store.batches == []
+
+
+def test_seed_corpus_tags_domain_and_skips_already_seeded_files():
+    store = RecordingStore()
+    documents = [("sources/a.txt", b"alpha source", [(None, "alpha source")]),
+                 ("sources/b.txt", b"beta source", [(None, "beta source")])]
+
+    assert ingestion_pipeline.seed_corpus(store, "medical", documents) == (["a.txt", "b.txt"], [], [])
+    saved = store.list_documents("corpus:medical")
+    assert [d["filename"] for d in saved] == ["a.txt", "b.txt"]
+    assert all(d["metadata"]["domain"] == "medical" for d in saved)
+    assert store.list_documents("corpus:education") == []
+
+    # a re-run, or a changed file reusing a seeded name, adds nothing
+    renamed = [("other/b.txt", b"beta changed", [(None, "beta changed")])]
+    assert ingestion_pipeline.seed_corpus(store, "medical", documents + renamed) == ([], ["a.txt", "b.txt", "b.txt"], [])
+    assert len(store.list_documents("corpus:medical")) == 2
+
+
+def test_seed_corpus_continues_after_a_failed_file():
+    class FlakyStore(RecordingStore):
+        def save_documents(self, user_id, documents):
+            if documents[0][0]["filename"] == "a.txt":
+                raise RuntimeError("embedding quota exceeded")
+            return super().save_documents(user_id, documents)
+
+    store = FlakyStore()
+    documents = [("sources/a.txt", b"alpha source", [(None, "alpha source")]),
+                 ("sources/b.txt", b"beta source", [(None, "beta source")])]
+
+    assert ingestion_pipeline.seed_corpus(store, "education", documents) == (["b.txt"], [], ["a.txt"])
+    assert [d["filename"] for d in store.list_documents("corpus:education")] == ["b.txt"]
