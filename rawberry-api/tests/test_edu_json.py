@@ -41,7 +41,7 @@ def test_source_is_searchable_but_metadata_is_not_in_chat_context(client):
     record = source()
     raw = json.dumps(record, ensure_ascii=False).encode('utf-8')
     response = upload(client, raw, filename='source.JSON')
-    assert response.status_code == 200
+    assert response.status_code == 201
     uploaded = response.json()[0]
     assert uploaded['chunk_count'] > 0
     assert uploaded['embedding_status'] == 'pending'  # Memory mode.
@@ -75,7 +75,7 @@ def test_source_is_searchable_but_metadata_is_not_in_chat_context(client):
 
 def test_minimal_source_bom_and_unicode_are_supported(client):
     raw = b'\xef\xbb\xbf' + json.dumps({'text': ['Patriots\u2019 triumph.']}, ensure_ascii=False).encode()
-    assert upload(client, raw).status_code == 200
+    assert upload(client, raw).status_code == 201
     assert client.app.state.store.list_chunks('corpus:' + client.source_domain)[0]['text'] == 'Patriots\u2019 triumph.'
 
 
@@ -118,7 +118,7 @@ def test_mixed_batch_and_invalid_json_batch_are_atomic(client):
     assert client.post(client.source_path, headers=headers, files=bad).status_code == 400
     assert client.app.state.store.list_documents('corpus:' + client.source_domain) == []
     response = client.post(client.source_path, headers=headers, files=files)
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert len(response.json()) == 2
     assert all(item['chunk_count'] > 0 for item in response.json())
 

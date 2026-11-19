@@ -82,12 +82,20 @@ def register_corpus_routes(path: str, domain: str) -> None:
         return store.list_documents(corpus_owner(domain))
 
     description = 'Developer-only multipart upload using the files field. Supports PDF, DOCX, and UTF-8 TXT.'
-    if domain in ('education', 'medical'):
-        description += (' Also accepts UTF-8 .json source objects with a nonempty text array and optional '
-                        'authors, institution, citation, title, header, date_published, date_added, start_page, and source_id. '
-                        'Source metadata is preserved separately from searchable text.')
+    description += (
+        ' Also accepts UTF-8 .json source objects with a nonempty text array and optional '
+        'authors, institution, citation, title, header, date_published, date_added, '
+        'start_page, and source_id.'
+    )
+    if domain == 'medical':
+        description += (
+            ' Medical JSON may instead contain body sections with heading, paragraphs, '
+            'and nested subsections, an optional abstract, and author objects with names.'
+        )
+    description += ' Source metadata is preserved separately from searchable text.'
 
-    @router.post(path, response_model=list[UploadResponse], description=description,
+
+    @router.post(path, response_model=list[UploadResponse], status_code=201, description=description,
                  dependencies=[Depends(require_developer)], responses={
                      400: {'model': UploadErrorResponse}, 413: {'model': UploadErrorResponse},
                  })
@@ -109,7 +117,7 @@ def get_user_documents(domain: ChatDomain, user_id: User, store: Repository = De
     return store.list_documents(user_id, domain)
 
 
-@router.post('/upload', response_model=list[UploadResponse], responses={
+@router.post('/upload', response_model=list[UploadResponse], status_code=201, responses={
     400: {'model': UploadErrorResponse}, 413: {'model': UploadErrorResponse},
 })
 def upload_user_document(

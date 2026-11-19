@@ -51,7 +51,7 @@ def test_document_listing_and_txt_source_locations():
     store = InMemoryStore()
     with TestClient(create_app(store=store), headers={'X-User-ID': 'alice'}) as client:
         upload = client.post("/uploadedu", headers={'X-Developer-Key': 'test-upload-key'}, files=[("files", ("notes.txt", b"alpha " * 400, "text/plain"))])
-        assert upload.status_code == 200
+        assert upload.status_code == 201
         documents = client.get("/uploadedu").json()
     assert len(documents) == 1
     assert documents[0]["id"] == upload.json()[0]["document_id"]

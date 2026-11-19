@@ -70,7 +70,7 @@ test('QuagBot restores chat history and answers from an uploaded document', asyn
     headers: { 'X-Developer-Key': 'test-upload-key' },
     body: source,
   });
-  expect(upload.status).toBe(200);
+  expect(upload.status).toBe(201);
   const [document] = await upload.json();
   expect(document.chunk_count).toBeGreaterThan(1);
 

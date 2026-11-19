@@ -4,8 +4,8 @@ from hashlib import blake2b
 import math
 import re
 from typing import Protocol
-
 from app.config import Settings, get_settings
+from concurrent.futures import ThreadPoolExecutor
 
 # Keep this pair pinned: changing either value requires re-embedding stored chunks.
 EMBEDDING_MODEL = "gemini-embedding-001"
@@ -13,47 +13,90 @@ EMBEDDING_DIMENSIONS = 768
 
 
 class VertexEmbeddingProvider:
-    """Use the same pinned model and dimensions for stored chunks and queries."""
-
+    """Use the same model and dimensions for documents and queries."""
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
 
     def embed_query(self, text: str) -> list[float]:
-        # Questions and source passages use different retrieval tasks within the same vector space.
         return self._embed(text, "RETRIEVAL_QUERY")
 
     def embed_document(self, text: str) -> list[float]:
         return self._embed(text, "RETRIEVAL_DOCUMENT")
 
-    def _embed(self, text: str, task_type: str) -> list[float]:
+    def _new_client(self):
         from google import genai
 
-        if not text.strip():
-            raise ValueError("Cannot embed empty text")
         if not self.settings.google_cloud_project:
-            raise ValueError("Set GOOGLE_CLOUD_PROJECT before using Vertex AI embeddings")
-        # Vertex AI uses Application Default Credentials, including Cloud Run's service account.
-        with genai.Client(
+            raise ValueError(
+                "Set GOOGLE_CLOUD_PROJECT before using Vertex AI embeddings"
+            )
+
+        return genai.Client(
             vertexai=True,
             project=self.settings.google_cloud_project,
             location=self.settings.google_cloud_location,
-        ) as client:
-            response = client.models.embed_content(
-                model=EMBEDDING_MODEL,
-                contents=text,
-                config={
-                    "task_type": task_type,
-                    "output_dimensionality": EMBEDDING_DIMENSIONS,
-                    # Truncated text would produce a vector for only part of the stored passage.
-                    "auto_truncate": False,
-                },
-            )
+        )
+
+    def _embed_with_client(self, client, text, task_type):
+        if not text.strip():
+            raise ValueError("Cannot embed empty text")
+
+        response = client.models.embed_content(
+            model=EMBEDDING_MODEL,
+            contents=text,
+            config={
+                "task_type": task_type,
+                "output_dimensionality": EMBEDDING_DIMENSIONS,
+                "auto_truncate": False,
+            },
+        )
+
         if not response.embeddings or len(response.embeddings) != 1:
             raise ValueError("Vertex AI must return one embedding")
+
         vector = response.embeddings[0].values
         validate_embedding(vector)
         return list(vector)
 
+    def _embed(self, text: str, task_type: str) -> list[float]:
+        if not text.strip():
+            raise ValueError("Cannot embed empty text")
+
+        with self._new_client() as client:
+            return self._embed_with_client(client, text, task_type)
+
+    def embed_documents(self, texts):
+        """Embed documents using one client per worker."""
+        if not texts:
+            return []
+
+        workers = min(8, len(texts))
+        indexed_texts = list(enumerate(texts))
+        groups = [
+            indexed_texts[index::workers]
+            for index in range(workers)
+        ]
+
+        def process_group(group):
+            results = []
+            with self._new_client() as client:
+                for index, text in group:
+                    vector = self._embed_with_client(
+                        client, text, "RETRIEVAL_DOCUMENT"
+                    )
+                    results.append((index, vector))
+            return results
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            groups_of_results = list(executor.map(process_group, groups))
+
+        results = []
+        for group in groups_of_results:
+            results.extend(group)
+
+        # Restore original chunk order after processing the groups.
+        results.sort(key=lambda item: item[0])
+        return [vector for index, vector in results]
 
 def validate_embedding(vector: list[float] | None) -> None:
     """Reject incompatible or unusable vectors before sending them to pgvector."""

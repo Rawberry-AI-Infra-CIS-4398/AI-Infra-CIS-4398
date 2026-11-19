@@ -86,9 +86,11 @@ print(json.dumps([base64.b64encode(sample).decode() for sample in samples]))
 `], { cwd: fileURLToPath(new URL('../../../rawberry-api/tests/', import.meta.url)), encoding: 'utf8' }));
   await page.goto('/docs');
   const medical = await execute(page, 'POST', '/uploadmedical', {
+    status: 201,
     files: [{ name: `medical-${user}.pdf`, mimeType: 'application/pdf', buffer: Buffer.from(samples[0], 'base64') }],
   });
   const education = await execute(page, 'POST', '/uploadedu', {
+    status: 201,
     files: [
       { name: `education-${user}.docx`, mimeType: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', buffer: Buffer.from(samples[1], 'base64') },
       { name: `education-${user}.txt`, mimeType: 'text/plain', buffer: Buffer.from('Archive inventory notes. '.repeat(100)) },
