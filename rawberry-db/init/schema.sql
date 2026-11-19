@@ -209,6 +209,30 @@ CREATE INDEX IF NOT EXISTS idx_chat_session_document
     ON chat_session(doc_id);
 
 -- ============================================================
+-- Documents attached to a conversation
+--
+-- Many-to-many: a chat can have several files, and a file can
+-- be reused across chats. attached_at is when the file joined
+-- this chat (document.uploaded_at is when it entered the system).
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS chat_session_document (
+    session_id BIGINT NOT NULL
+        REFERENCES chat_session(id) ON DELETE CASCADE,
+
+    document_id BIGINT NOT NULL
+        REFERENCES document(id) ON DELETE CASCADE,
+
+    attached_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    PRIMARY KEY (session_id, document_id)
+);
+
+-- Reverse lookup: which chats use this document.
+CREATE INDEX IF NOT EXISTS idx_chat_session_document_document
+    ON chat_session_document(document_id);
+
+-- ============================================================
 -- Active conversation history
 --
 -- Each row stores a user prompt and its generation outcome.
@@ -258,6 +282,51 @@ CREATE TABLE IF NOT EXISTS chat_turn (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_chat_turn_pending
     ON chat_turn(session_id)
     WHERE status = 'pending';
+
+-- ============================================================
+-- Conversation timeline (FR-09)
+--
+-- One row per key moment in a chat. document_id / turn_id point
+-- at what the event is about; SET NULL keeps the event on the
+-- timeline even if that file or turn is later deleted.
+-- detail holds event-specific data, e.g. old/new title.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS chat_event (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+    session_id BIGINT NOT NULL
+        REFERENCES chat_session(id) ON DELETE CASCADE,
+
+    event_type TEXT NOT NULL
+        CHECK (
+            event_type IN (
+                'session_created',
+                'file_uploaded',
+                'file_attached',
+                'turn_started',
+                'turn_completed',
+                'turn_failed',
+                'title_changed',
+                'domain_changed',
+                'session_deleted'
+            )
+        ),
+
+    document_id BIGINT
+        REFERENCES document(id) ON DELETE SET NULL,
+
+    turn_id UUID
+        REFERENCES chat_turn(id) ON DELETE SET NULL,
+
+    detail JSONB NOT NULL DEFAULT '{}'::jsonb
+        CHECK (jsonb_typeof(detail) = 'object'),
+
+    occurred_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_event_session_time
+    ON chat_event(session_id, occurred_at, id);
 
 -- ============================================================
 -- Message, Citation, and Access Structures
@@ -348,7 +417,7 @@ CREATE TABLE IF NOT EXISTS schema_migration (
 );
 
 INSERT INTO schema_migration (version)
-VALUES ('baseline_001')
+VALUES ('baseline_001'), ('timeline_002')
 ON CONFLICT DO NOTHING;
 
 COMMIT;
