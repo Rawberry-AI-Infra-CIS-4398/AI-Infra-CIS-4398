@@ -6,7 +6,7 @@ import { readChatResult } from '../sse.js';
 
 test.use({ baseURL: 'http://127.0.0.1:8000', storageState: { cookies: [], origins: [] } });
 
-async function execute(page, method, path, { user, id, body, files, status = 200 } = {}) {
+async function execute(page, method, path, { user, id, body, files, domain, status = 200 } = {}) {
   const operation = page.locator(`.opblock-${method.toLowerCase()}`).filter({
     has: page.locator(`.opblock-summary-path[data-path="${path}"]`),
   });
@@ -19,8 +19,13 @@ async function execute(page, method, path, { user, id, body, files, status = 200
   if (user) await operation.locator('tr[data-param-name="X-User-ID"] input').fill(user);
   if (id) await operation.locator('tr[data-param-name="conversation_id"] input').fill(id);
   if (body) await operation.locator('textarea.body-param__text').fill(JSON.stringify(body));
+  if (domain) {
+    await operation.locator('select').filter({ has: page.locator('option[value="education"]') }).selectOption(domain);
+  }
   if (files) {
-    await operation.locator('tr[data-param-name="X-Developer-Key"] input').fill('test-upload-key');
+    if (path !== '/upload') {
+      await operation.locator('tr[data-param-name="X-Developer-Key"] input').fill('test-upload-key');
+    }
     for (const [index, file] of files.entries()) {
       if (index > 0) await operation.getByRole('button', { name: 'Add string item', exact: true }).click();
       await operation.locator('input[type="file"]').nth(index).setInputFiles(file);
@@ -39,6 +44,34 @@ async function execute(page, method, path, { user, id, body, files, status = 200
     ? readChatResult(response)
     : response.json();
 }
+
+test('Swagger uploads all three personal PDFs and lists their returned IDs', async ({ page }) => {
+  const user = `swagger-bulk-${randomUUID()}`;
+  const samples = JSON.parse(execFileSync(process.env.RAWBERRY_PYTHON || 'python', ['-B', '-c', `
+import base64
+import json
+from pdf_samples import make_pdf
+print(json.dumps([base64.b64encode(make_pdf(text)).decode() for text in [
+    'Saratoga registry code MAPLE-188.', 'Yorktown registry code BIRCH-189.', 'Boston registry code OAK-190.'
+]]))
+`], { cwd: fileURLToPath(new URL('../../../rawberry-api/tests/', import.meta.url)), encoding: 'utf8' }));
+  const names = ['first.pdf', 'second.pdf', 'third.pdf'];
+  await page.goto('/docs');
+  const uploaded = await execute(page, 'POST', '/upload', {
+    user, domain: 'education', status: 201,
+    files: samples.map((sample, index) => ({
+      name: names[index], mimeType: 'application/pdf', buffer: Buffer.from(sample, 'base64'),
+    })),
+  });
+  expect(uploaded.map(({ filename }) => filename)).toEqual(names);
+  expect(new Set(uploaded.map(({ document_id }) => document_id)).size).toBe(3);
+  const listed = await page.request.get('/upload', {
+    headers: { 'X-User-ID': user }, params: { domain: 'education' },
+  });
+  expect(listed.status()).toBe(200);
+  expect((await listed.json()).map(({ id }) => id).sort())
+    .toEqual(uploaded.map(({ document_id }) => document_id).sort());
+});
 
 test('Swagger demonstrates prompts, follow-up context, history, and sharing', async ({ page }) => {
   const owner = `swagger-owner-${randomUUID()}`;

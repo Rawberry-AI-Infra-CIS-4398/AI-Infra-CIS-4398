@@ -146,6 +146,20 @@ apply to subsequent turns across the user's conversations.
 
 Users upload personal files through `POST /upload` with `X-User-ID`, a required
 multipart `domain` field (`medical` or `education`), and one or more `files`.
+In Swagger, click **Try it out**, enter `X-User-ID`, choose a domain, and use
+**Choose File** for each item. **Add string item** adds another file picker;
+it is not a pasted-text field. For three PDFs, add three items and select one PDF
+per item. Remove unused empty items. An invalid selected file rejects the whole batch.
+The 201 response must contain one result per file, with its filename and document ID.
+Confirm all returned IDs appear in `GET /upload` with the same user and domain;
+personal uploads are not listed by `/uploadedu` or `/uploadmedical`.
+
+For example, from a terminal with two local TXT files:
+
+```powershell
+curl.exe -X POST "http://127.0.0.1:8000/upload" -H "X-User-ID: alice" -F "domain=education" -F "files=@first.txt" -F "files=@second.txt"
+```
+
 List those files with `GET /upload?domain=education` (or `medical`) using the
 same user header. Both methods use the same path; no `/documents` endpoint is exposed.
 Personal uploads accept PDF, DOCX, and TXT. Chat searches the conversation's

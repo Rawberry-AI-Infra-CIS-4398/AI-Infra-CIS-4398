@@ -126,6 +126,12 @@ def upload_user_document(
     files: Annotated[list[UploadFile], File(..., json_schema_extra={'items': {'type': 'string', 'format': 'binary'}})],
     service: DocumentService = Depends(get_document_service),
 ):
+    """Upload one or more personal files using repeated multipart files fields.
+
+    Set X-User-ID and select medical or education as domain. Each Swagger
+    'Add string item' slot is a file picker, not a pasted-text input. Select a
+    file in every added slot. All selected files are validated before any are stored.
+    """
     return service.upload_document(user_id, files, domain)
 
 
