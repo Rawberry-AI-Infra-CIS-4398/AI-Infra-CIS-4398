@@ -7,7 +7,7 @@ from fastapi import HTTPException, UploadFile, status
 
 from app import ingestion
 from app.corpora import corpus_owner
-from app.edu_json import InvalidEducationJson, parse_education_json
+from app.source_json import InvalidSourceJson, parse_source_json
 
 from app.ingestion import (
     InvalidFileContent,
@@ -106,18 +106,18 @@ class DocumentService:
             source_metadata = {}
             if ext == '.json':
                 try:
-                    pages, source = parse_education_json(raw_bytes)
+                    pages, source = parse_source_json(raw_bytes, source_domain)
                     source_metadata = {source_domain: source}
                 except UnicodeDecodeError as exc:
                     raise HTTPException(400, detail={
                         'success': False, 'error_code': 'INVALID_TEXT_ENCODING',
                         'message': 'JSON files must use UTF-8 encoding.',
                     }) from exc
-                except InvalidEducationJson as exc:
+                except InvalidSourceJson as exc:
                     raise HTTPException(400, detail={
-                        'success': False, 'error_code': ('INVALID_MEDICAL_JSON' if source_domain == 'medical' else 'INVALID_EDU_JSON'),
-                        'message': ('Expected one source JSON object with a nonempty text array of nonblank strings '
-                                    'and valid source metadata. See the upload documentation for supported fields.'),
+                        'success': False,
+                        'error_code': ('INVALID_MEDICAL_JSON' if source_domain == 'medical' else 'INVALID_EDU_JSON'),
+                        'message': str(exc),
                     }) from exc
             else:
                 pages = self._extract_pages(ext, raw_bytes)

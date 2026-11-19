@@ -145,7 +145,7 @@ def test_txt_upload_cleans_text_and_preserves_bytes():
             ],
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 201, response.text
 
         document_id = response.json()[0]["document_id"]
         chunks = store.list_chunks("corpus:education")
@@ -274,7 +274,7 @@ def test_docx_upload_is_cleaned():
             ],
         )
 
-        assert response.status_code == 200, response.text
+        assert response.status_code == 201, response.text
 
         chunks = store.list_chunks("corpus:education")
         assert len(chunks) == 1

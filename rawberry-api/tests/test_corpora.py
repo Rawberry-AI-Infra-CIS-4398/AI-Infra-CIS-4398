@@ -23,7 +23,7 @@ def test_shared_corpora_and_private_conversations(monkeypatch):
             assert client.post(path, files=files).status_code == 403
             assert client.post(path, files=files, headers={"X-User-ID": "alice"}).status_code == 403
             assert client.post(path, files=files, headers={"X-Developer-Key": "bad"}).status_code == 403
-            assert client.post(path, files=files, headers={"X-Developer-Key": "dev-secret"}).status_code == 200
+            assert client.post(path, files=files, headers={"X-Developer-Key": "dev-secret"}).status_code == 201
             assert client.get(path).status_code == 422
             for user in ["alice", "bob"]:
                 assert len(client.get(path, headers={"X-User-ID": user}).json()) == 1
@@ -64,7 +64,7 @@ def test_user_uploads_are_private_and_domain_scoped():
         files = [("files", ("notes.txt", b"gamma alice-medical-upload", "text/plain"))]
         assert client.post("/upload", headers=alice, files=files).status_code == 422
         assert client.post("/upload", headers=alice, files=files, data={"domain": "unknown"}).status_code == 422
-        assert client.post("/upload", headers=alice, files=files, data={"domain": "medical"}).status_code == 200
+        assert client.post("/upload", headers=alice, files=files, data={"domain": "medical"}).status_code == 201
         assert len(client.get("/upload", headers=alice, params={"domain": "medical"}).json()) == 1
         assert client.get("/upload", headers=alice, params={"domain": "education"}).json() == []
         assert client.get("/upload", headers={"X-User-ID": "bob"}, params={"domain": "medical"}).json() == []

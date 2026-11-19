@@ -74,7 +74,7 @@ def test_every_data_route_requires_user_context(method, path, body):
 def test_developer_upload_does_not_require_user_context(path, corpus):
     with TestClient(create_app(store=InMemoryStore())) as client:
         response = client.post(path, headers={'X-Developer-Key': 'test-upload-key'}, files=[('files', ('a.txt', b'hello', 'text/plain'))])
-        assert response.status_code == 200
+        assert response.status_code == 201
         assert len(client.app.state.store.list_documents(corpus)) == 1
 
 
@@ -135,7 +135,7 @@ def exercise_isolation(store):
     with TestClient(app, headers={'X-User-ID': 'alice'}) as client:
         for user in ['alice', 'bob']:
             assert client.put('/me/system-prompt', headers={'X-User-ID': user}, json={'prompt': user + '-preference'}).status_code == 200
-            assert upload(client, text=('gamma ' + user + '-document').encode(), user=user).status_code == 200
+            assert upload(client, text=('gamma ' + user + '-document').encode(), user=user).status_code == 201
         first, second, other = conversation(client), conversation(client), conversation(client, 'bob')
         assert len(client.get('/conversations').json()) == 2
         assert len(client.get('/uploadedu').json()) == 2
@@ -256,7 +256,7 @@ def test_preferences_update_clear_and_validation(client):
 
 def test_upload_retains_bytes_and_txt_chunks(client):
     response = upload(client, b'hello gamma')
-    assert response.status_code == 200
+    assert response.status_code == 201
     document = response.json()[0]
     assert document['chunk_count'] == 1 and document['embedding_status'] == 'pending'
     store = client.app.state.store
@@ -267,7 +267,7 @@ def test_upload_retains_bytes_and_txt_chunks(client):
 
 def test_pdf_upload_chunks_each_page_with_its_page_number(client):
     response = upload(client, make_pdf('alpha first page', '', 'gamma third page'), name='paper.pdf')
-    assert response.status_code == 200
+    assert response.status_code == 201
     document = response.json()[0]
     assert document['chunk_count'] == 2
     chunks = client.app.state.store.list_chunks('corpus:education')
@@ -285,7 +285,7 @@ def test_pdf_upload_chunks_each_page_with_its_page_number(client):
 def test_docx_upload_chunks_paragraphs_and_table_rows_in_order(client):
     content = make_docx('alpha intro', table=[['Name', 'Score'], ['gamma', '42']])
     response = upload(client, content, name='report.docx')
-    assert response.status_code == 200
+    assert response.status_code == 201
     assert response.json()[0]['chunk_count'] == 1
     store = client.app.state.store
     chunks = store.list_chunks('corpus:education')
@@ -299,7 +299,7 @@ def test_docx_upload_chunks_paragraphs_and_table_rows_in_order(client):
 
 def test_long_text_is_split_on_word_boundaries_with_overlap(client):
     words = ' '.join(f'word{i}' for i in range(600))
-    assert upload(client, words.encode()).status_code == 200
+    assert upload(client, words.encode()).status_code == 201
     chunks = [c['text'] for c in client.app.state.store.list_chunks('corpus:education')]
     assert len(chunks) > 1 and all(len(text) <= 900 for text in chunks)
     assert all(text.split()[-1] in words.split() for text in chunks)  # no word cut in half
@@ -376,7 +376,7 @@ def test_document_upload_is_the_only_source_entry_point(client):
     advertised = client.get('/').json()['available_endpoints']
     assert '/ingest' not in advertised and '/get' not in advertised
     assert '/uploadedu' in advertised
-    assert upload(client, b'gamma uploaded document').status_code == 200
+    assert upload(client, b'gamma uploaded document').status_code == 201
     identifier = conversation(client)
     response = ask(client, identifier, 'gamma')
     assert response.status_code == 200
@@ -421,7 +421,7 @@ def test_upload_chunks_reach_stage_one_retrieval(client, monkeypatch):
         return original(self, query, limit, owner_id=owner_id)
 
     monkeypatch.setattr(RetrievalService, 'retrieve', capture)
-    assert upload(client, b'The moon orbits Earth every 27 days.').status_code == 200
+    assert upload(client, b'The moon orbits Earth every 27 days.').status_code == 201
     assert client.put('/me/system-prompt', json={'prompt': 'Answer in one sentence.'}).status_code == 200
     response = ask(client, conversation(client), 'How long does the moon orbit Earth?')
     assert response.status_code == 200

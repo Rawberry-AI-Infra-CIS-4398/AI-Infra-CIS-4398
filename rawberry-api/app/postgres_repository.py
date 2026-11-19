@@ -3,12 +3,13 @@
 Connections are scoped to an operation; uploads use one transaction for the batch.
 No DDL is run by the application. Create the database from rawberry-db/init/schema.sql before startup.
 """
-
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 from typing import Any
 
 from app.repository import StorageError
+from app.retrieval import embeddings as embedding_types
 from uuid import uuid4
 
 from app.conversation import CONVERSATION_TTL_SECONDS, TURN_TIMEOUT_SECONDS, describe_exchange, messages_from_turns
@@ -75,9 +76,26 @@ class PostgresRepository:
         """
         from psycopg.types.json import Jsonb
 
-        # Generate the entire batch before writing, so a provider failure cannot leave partial uploads.
-        # shortcut: embedding is synchronous; move large document batches to a worker when needed.
-        vectors = [[self._embed(chunk['text']) for chunk in chunks] for _, _, chunks in documents]
+        # Generate all embeddings before writing any documents.
+        vectors = []
+        for _, _, chunks in documents:
+            texts = [chunk['text'] for chunk in chunks]
+
+            if isinstance(
+                self.embeddings, embedding_types.VertexEmbeddingProvider
+            ):
+                try:
+                    document_vectors = self.embeddings.embed_documents(texts)
+                    vectors.append([
+                        json.dumps(vector, allow_nan=False)
+                        for vector in document_vectors
+                    ])
+                except Exception as exc:
+                    raise StorageError("Embedding generation failed") from exc
+            else:
+                # Keep existing support for fake and custom embedding providers.
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    vectors.append(list(executor.map(self._embed, texts)))
         statuses = ['completed' if chunks else 'pending' for _, _, chunks in documents]
         with self._connection() as connection:
             for (document, content, chunks), embeddings, embedding_status in zip(documents, vectors, statuses, strict=True):
@@ -90,6 +108,32 @@ class PostgresRepository:
                      document['size_bytes'], embedding_status, Jsonb(document.get('metadata', {}))),
                 ).fetchone()
                 internal_id = row['id']
+
+                metadata = document.get('metadata', {})
+                source = metadata.get('medical') or metadata.get('education') or {}
+
+                for name in source.get('authors', []):
+                    name = name.strip()
+                    if not name:
+                        continue
+
+                    author = connection.execute(
+                        "SELECT id FROM author WHERE name = %s ORDER BY id LIMIT 1",
+                        (name,),
+                    ).fetchone()
+
+                    if author is None:
+                        author = connection.execute(
+                            "INSERT INTO author(name) VALUES (%s) RETURNING id",
+                            (name,),
+                        ).fetchone()
+
+                    connection.execute(
+                        "INSERT INTO document_author(document_id, author_id) "
+                        "VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                        (internal_id, author['id']),
+                    )
+
                 connection.execute(
                     "INSERT INTO document_content(document_id, content) VALUES (%s, %s)",
                     (internal_id, content),

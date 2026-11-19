@@ -66,7 +66,7 @@ def test_education_json_metadata_and_chunks_survive_restart(database_url):
     with TestClient(create_app(store=PostgresRepository(database_url))) as client:
         response = client.post('/uploadedu', headers={'X-Developer-Key': 'test-upload-key'},
                                files=[('files', ('source.json', raw, 'application/json'))])
-        assert response.status_code == 200
+        assert response.status_code == 201
         assert response.json()[0]['embedding_status'] == 'completed'
         identifier = response.json()[0]['document_id']
     store = PostgresRepository(database_url)
@@ -87,7 +87,7 @@ def test_data_survives_application_recreation_and_is_shared(database_url, monkey
             ("files", ("notes.txt", b"alpha beta gamma", "text/plain")),
             ("files", ("paper.pdf", TEXT_PDF, "application/pdf")),
         ])
-        assert uploaded.status_code == 200
+        assert uploaded.status_code == 201
         assert [d['embedding_status'] for d in uploaded.json()] == ['completed', 'completed']
         assert first.put("/me/system-prompt", json={"prompt": "Be concise"}).status_code == 200
         with TestClient(create_app(), headers={'X-User-ID': 'alice', 'X-Developer-Key': 'test-upload-key'}) as second:
@@ -139,7 +139,7 @@ def test_uploaded_pdf_is_embedded_and_answers_chat_with_its_page(database_url):
         uploaded = client.post('/uploadedu', headers={'X-Developer-Key': 'test-upload-key'}, files=[
             ('files', ('paper.pdf', make_pdf('intro page', 'zebra migration patterns'), 'application/pdf')),
         ])
-        assert uploaded.status_code == 200
+        assert uploaded.status_code == 201
         assert uploaded.json()[0]['embedding_status'] == 'completed'
         assert uploaded.json()[0]['chunk_count'] == 2
         results = repository.search_chunks('corpus:education', 'zebra migration')
@@ -330,7 +330,7 @@ def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_ur
             uploaded = client.post('/uploadmedical' if owner == 'bob' else '/uploadedu', headers={'X-Developer-Key': 'test-upload-key'}, files=[
                 ('files', ('notes.txt', text.encode(), 'text/plain')),
             ])
-            assert uploaded.status_code == 200
+            assert uploaded.status_code == 201
             assert uploaded.json()[0]['embedding_status'] == 'completed'
 
     # Recreate application/storage to prove generation uses durable vectors.
@@ -347,8 +347,12 @@ def test_persistent_retrieval_reaches_gemini_with_only_owned_context(database_ur
         history = client.get(f'/conversations/{identifier}/messages').json()
         assert [entry['status'] for entry in history] == ['completed', 'completed']
 
-    sdk_client.models.embed_content.assert_called_once()
-    assert sdk_client.models.embed_content.call_args.kwargs['config']['task_type'] == 'RETRIEVAL_QUERY'
+    calls = sdk_client.models.embed_content.call_args_list
+    assert len(calls) == 2
+
+    for call in calls:
+        assert call.kwargs['contents'] == question
+        assert call.kwargs['config']['task_type'] == 'RETRIEVAL_QUERY'
     generate = sdk_client.models.generate_content_stream
     generation = generate.call_args.kwargs
     assert generation['model'] == 'gemini-2.5-flash'
