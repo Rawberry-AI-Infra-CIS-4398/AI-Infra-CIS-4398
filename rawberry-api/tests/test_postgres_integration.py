@@ -45,6 +45,8 @@ def database_url(monkeypatch):
     try:
         with psycopg.connect(url, autocommit=True) as connection:
             connection.execute((root / "init/schema.sql").read_text())
+            for migration in sorted((root / "migrations").glob("*.sql")):
+                connection.execute(migration.read_text())
         yield url
     finally:
         with psycopg.connect(base_url, autocommit=True) as admin:

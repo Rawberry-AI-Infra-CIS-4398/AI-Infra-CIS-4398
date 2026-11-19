@@ -33,7 +33,7 @@ def test_description_persists_and_is_only_set_by_successful_owned_turn(database_
     assert restarted.list_conversations('alice')[0]['description'] == 'Question: Backfill question Answer: Backfill answer'
 
 
-@pytest.mark.parametrize('missing_version', ['baseline_001'])
+@pytest.mark.parametrize('missing_version', ['baseline_001', 'retrieval_metadata_002'])
 def test_description_database_length_constraint_and_readiness(database_url, missing_version):
     repository = PostgresRepository(database_url)
     identifier = repository.create_conversation('alice', 'Bounded')['id']

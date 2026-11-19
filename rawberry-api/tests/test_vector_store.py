@@ -62,7 +62,7 @@ def test_search_uses_query_embeddings_and_safe_sql_parameters(monkeypatch):
     provider.embed_query.return_value = [1.0] + [0.0] * 767
     repository = PostgresRepository('unused', embeddings=provider)
     connection = MagicMock()
-    connection.execute.return_value.fetchall.return_value = [{'text': 'result'}]
+    connection.execute.return_value.fetchall.return_value = [{'text': 'result', 'chunk_index': 0, 'page_number': None}]
 
     @contextmanager
     def connect():
@@ -70,7 +70,8 @@ def test_search_uses_query_embeddings_and_safe_sql_parameters(monkeypatch):
 
     monkeypatch.setattr(repository, '_connection', connect)
     owner = "alice' OR TRUE --"
-    assert repository.search_chunks(owner, 'question', 2) == [{'text': 'result'}]
+    assert repository.search_chunks(owner, 'question', 2) == [dict(
+        text='result', chunk_index=0, page_number=None, source_start_line=None, source_end_line=None)]
     statement, parameters = connection.execute.call_args.args
     assert owner not in statement
     assert 'd.user_id = %s' in statement

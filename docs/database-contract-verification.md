@@ -3,14 +3,14 @@
 API models describe public data, not SQL rows. `PostgresRepository` maps internal
 BIGINT keys to public UUID strings, SQL names to API names, and `chat_turn` rows
 to ordered message records. Verify those mappings against a database built from
-`rawberry-db/init/schema.sql`.
+`rawberry-db/init/schema.sql` plus all numbered migrations.
 
 `rawberry-api/tests/test_schema_contract.py` strictly validates repository results
 against the public Pydantic models. It covers documents, chunks, metadata, binary
 contents, preferences, conversation timestamps, and pending/completed/failed turns.
 The existing PostgreSQL integration tests cover ownership, rollback, persistence,
 vector retrieval, and recovery. Their fixture builds each test schema from
-`init/schema.sql`.
+`init/schema.sql` and applies all numbered migrations.
 
 ## Run against a disposable local database
 

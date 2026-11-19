@@ -105,3 +105,24 @@ print(json.dumps([base64.b64encode(sample).decode() for sample in samples]))
     expect(reply).not.toContain(other);
   }
 });
+
+test('Swagger shows retrieval match and citations in answers and saved history', async ({ page }) => {
+  const user = `swagger-citations-${randomUUID()}`;
+  const text = `Registry marker ${user} is PINE-724.`;
+  await page.goto('/docs');
+  const uploaded = await execute(page, 'POST', '/uploadedu', {
+    files: [{ name: `${user}.txt`, mimeType: 'text/plain', buffer: Buffer.from(text) }],
+  });
+  const { id } = await execute(page, 'POST', '/conversations', {
+    user, status: 201, body: { title: 'Retrieval citations', domain: 'education' },
+  });
+  const answer = await execute(page, 'POST', '/chat', { user, body: { conversation_id: id, message: text } });
+  expect(answer.retrieval_match_percent).toBe(100);
+  expect(answer.sources).toContainEqual({
+    document_id: uploaded[0].document_id, filename: `${user}.txt`, page_number: null,
+    chunk_index: 0, excerpt: text, source_start_line: 1, source_end_line: 1,
+  });
+  const history = await execute(page, 'GET', '/conversations/{conversation_id}/messages', { user, id });
+  expect(history[1].sources).toEqual(answer.sources);
+  expect(history[1].retrieval_match_percent).toBe(100);
+});

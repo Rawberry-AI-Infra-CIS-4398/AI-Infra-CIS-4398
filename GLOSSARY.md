@@ -21,3 +21,8 @@ RAWBerry answers questions using source documents from the conversation's corpus
 **Conversation context**: The earlier completed turns RAWBerry includes when asking the model to answer a new question.
 
 **Shared conversation**: A conversation the owner makes available for specific recipients to read.
+
+**Retrieval match**: A percentage describing how closely the best retrieved passage matches the current question. It does not estimate answer correctness or whether the answer is supported.
+_Avoid_: Model confidence, answer confidence
+
+**Source citation**: A reference to a passage supplied as document context for an answer, including its document identity and available page and extracted text line range. It does not establish that the passage supports every claim in the answer.

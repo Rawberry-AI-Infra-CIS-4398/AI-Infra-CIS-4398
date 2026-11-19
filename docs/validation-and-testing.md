@@ -2,7 +2,7 @@
 
 The normal CI suite runs the API and retrieval tests with mocked chat generation
 and a disposable pgvector PostgreSQL service. PostgreSQL integration tests create
-and drop isolated schemas from `rawberry-db/init/schema.sql`; never point
+and drop isolated schemas from `rawberry-db/init/schema.sql` plus numbered migrations; never point
 `TEST_DATABASE_URL` at a shared database.
 
 ## Backend and database suites
@@ -121,6 +121,8 @@ schema and start the local API with deterministic chat and embeddings:
 ```bash
 docker exec -i rawberry-validation-pg16 psql -U postgres -d rawberry_test \
   -v ON_ERROR_STOP=1 < rawberry-db/init/schema.sql
+docker exec -i rawberry-validation-pg16 psql -U postgres -d rawberry_test \
+  -v ON_ERROR_STOP=1 < rawberry-db/migrations/002_retrieval_metadata.sql
 env -u DATABASE_URL PYTHONPATH=rawberry-api DEVELOPER_UPLOAD_API_KEY=test-upload-key \
   TEST_DATABASE_URL=postgresql://postgres:contract-local-only@127.0.0.1:55432/rawberry_test \
   python -B tests/e2e/serve_demo.py
@@ -133,7 +135,7 @@ from `tests/e2e` with the same Python environment activated:
 PLAYWRIGHT_HEADLESS=true npm test -- specs/rawberry-swagger.spec.js specs/rawberry-demo.spec.js
 ```
 
-Expect two Swagger browser tests and one HTTP test. Stop the server with Ctrl+C
+Expect three Swagger browser tests and one HTTP test. Stop the server with Ctrl+C
 and remove the disposable database with `docker stop rawberry-validation-pg16`.
 
 ### Feature steps
@@ -145,3 +147,30 @@ and remove the disposable database with `docker stop rawberry-validation-pg16`.
 | Conversation context | Ask a follow-up that refers to the first question. In the local rehearsal, the mock reply shows the earlier turn. PostgreSQL tests exercise the 10 completed turn cap and 12,000-character history budget while retaining the full transcript. |
 | Sharing | In RAWBerry `/docs`, use the owner's ID to `PUT /conversations/{id}/shares` with `{"user_ids":["demo-recipient"]}`. Read `GET /shared/{id}` as the recipient. Clear the list and repeat the recipient read to show the `404`. The API supports recipient permissions. Shareable URLs have no route in this build. |
 | Document processing | Use the developer key to upload synthetic PDF, DOCX, and TXT files to the medical and education corpora. Check the chunk count and ask a question in the matching conversation domain. The Swagger rehearsal verifies both upload routes and corpus isolation. |
+
+## Retrieval match and source citations in Swagger
+
+After applying the database migration and starting the updated API, open `/docs`.
+Upload a short TXT or PDF using `POST /uploadedu` and `X-Developer-Key`, create an
+education conversation with `X-User-ID`, and send its ID and a question to `/chat`.
+Check `retrieval_match_percent` and `sources`: filenames and IDs must match the
+upload, PDF pages use their original page numbers, and TXT/DOCX pages are null.
+Check `source_start_line` and `source_end_line` against the extracted passage: they
+are inclusive and start at 1, restarting per PDF page. A five-line passage with
+repeated blank lines should still end at source line 5 even if cleaning removes
+one blank line. Documents without extraction maps return null line ranges.
+These ranges are extracted text locations, not printed PDF line labels.
+Use a complete uploaded sentence as the question for a 100% retrieval match.
+
+Read `/conversations/{conversation_id}/messages`, then share the conversation and
+read `/shared/{conversation_id}` as the recipient. Assistant metadata must match
+the original response. `/chat/stream` returns the same metadata in the completed
+SSE event. With an empty corpus, expect null and an empty list. These percentages
+measure retrieval relevance, not answer correctness; mock chat also returns them.
+
+The local browser scenario is `tests/e2e/specs/rawberry-swagger.spec.js`:
+
+```bash
+cd tests/e2e
+PLAYWRIGHT_HEADLESS=true npm test -- specs/rawberry-swagger.spec.js
+```

@@ -36,7 +36,7 @@ Set environment variables before starting the API; `.env` files are not loaded a
 | `GEMINI_MODEL` | Chat model; defaults to `gemini-2.5-flash`. |
 
 PostgreSQL mode requires the supplied database schema and Vertex AI access for
-embeddings, even when chat responses are mocked. The API does not apply migrations.
+embeddings, even when chat responses are mocked. Apply the baseline schema and all numbered migrations before startup; the API does not apply migrations.
 Local development uses Application Default Credentials; Cloud Run uses its service account.
 
 ## Authentication boundary and user context
@@ -96,7 +96,55 @@ Use the returned `id` in `POST /chat` or `POST /chat/stream` with the same user 
 }
 ```
 
-`/chat` returns `conversation_id`, `turn_id`, and `reply` in one JSON response.
+`/chat` returns `conversation_id`, `turn_id`, `reply`, `retrieval_match_percent`, and `sources` in one JSON response.
+
+`retrieval_match_percent` is the highest current-question passage similarity multiplied
+by 100, rounded to the nearest whole percent (ties to even). It describes retrieval
+relevance, not model confidence, factual accuracy, or verified answer support. No
+retrieved passages means `null` and an empty `sources` list; answers can still be generated.
+In-memory hash retrieval and PostgreSQL model embeddings can produce different scores.
+
+`sources` contains every retrieved passage supplied to the model (up to the existing
+three-passage limit), in retrieval order. `filename` is exactly the uploaded filename,
+read from storage. The model receives these source labels beside the passages and is
+instructed to use them when citing, rather than production filenames or page labels
+embedded in document text. Structured `sources` remains the authoritative citation
+list; generated citation text can still contain model errors.
+Each entry includes `document_id`, `filename`,
+`page_number` (null for TXT/DOCX), zero-based `chunk_index`, and `excerpt` (the supplied
+chunk text), `source_start_line`, and `source_end_line` (inclusive, starting at 1).
+PDF line numbers refer to extracted text and restart on each page; TXT/DOCX line
+numbers span the extracted document. They may differ from visual wrapping or printed
+line labels in the PDF. Blank lines count toward the original extracted locations,
+even when cleaning collapses them. These ranges cover the supplied passage, rather
+than identifying exactly which lines the model relied on. Line ranges are null for
+older documents without a saved extraction map; re-uploading a document creates one.
+Multiple passages can reference the same document. This is a context
+list, not a list of verified supporting claims. Earlier conversation context is not
+included in the current score or source list.
+
+```json
+{
+  "conversation_id": "550e8400-e29b-41d4-a716-446655440000",
+  "turn_id": "550e8400-e29b-41d4-a716-446655440001",
+  "reply": "The registry code is PINE-724.",
+  "retrieval_match_percent": 83,
+  "sources": [{
+    "document_id": "550e8400-e29b-41d4-a716-446655440002",
+    "filename": "registry.pdf",
+    "page_number": 2,
+    "chunk_index": 1,
+    "excerpt": "The registry code is PINE-724.",
+    "source_start_line": 12,
+    "source_end_line": 12
+  }]
+}
+```
+
+The same fields appear in the stream's completed `response` and are saved with the
+answer for history and shared conversation reads. User messages and older assistant
+messages have `retrieval_match_percent: null` and `sources: []`. Saved source excerpts
+are snapshots of the supplied passages; history reads do not rerun retrieval.
 `/chat/stream` returns SSE `status` events: `received`, `generating`, then
 `completed` or `failed`. The completed event contains the answer in `response.reply`.
 It reports progress, not individual words or tokens. There is no `/chat/status` route.

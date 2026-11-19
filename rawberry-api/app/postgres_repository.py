@@ -1,7 +1,7 @@
 """PostgreSQL persistence behind the API storage boundary.
 
 Connections are scoped to an operation; uploads use one transaction for the batch.
-No DDL is run by the application. Create the database from rawberry-db/init/schema.sql before startup.
+No DDL is run by the application. Apply rawberry-db/init/schema.sql and numbered migrations before startup.
 """
 
 from contextlib import contextmanager
@@ -9,6 +9,7 @@ import json
 from typing import Any
 
 from app.repository import StorageError
+from app.retrieval.chunk_search import source_line_range
 from uuid import uuid4
 
 from app.conversation import CONVERSATION_TTL_SECONDS, TURN_TIMEOUT_SECONDS, describe_exchange, messages_from_turns
@@ -20,7 +21,7 @@ from app.retrieval.embeddings import (
     VertexEmbeddingProvider,
     validate_embedding,
 )
-REQUIRED_SCHEMA_VERSION = 'baseline_001'
+REQUIRED_SCHEMA_VERSIONS = ('baseline_001', 'retrieval_metadata_002')
 
 
 class PostgresRepository:
@@ -51,12 +52,12 @@ class PostgresRepository:
 
     def check_ready(self) -> None:
         with self._connection() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM schema_migration WHERE version = %s",
-                (REQUIRED_SCHEMA_VERSION,),
-            ).fetchone()
-            if row is None:
-                raise StorageError("Required database migration is missing")
+            for version in REQUIRED_SCHEMA_VERSIONS:
+                row = connection.execute(
+                    "SELECT 1 FROM schema_migration WHERE version = %s", (version,),
+                ).fetchone()
+                if row is None:
+                    raise StorageError("Required database migration is missing")
 
     def check_database_connection(self) -> None:
         """Probe the configured database without reading application data."""
@@ -144,19 +145,23 @@ class PostgresRepository:
             # CASE prevents pgvector from comparing legacy embeddings with incompatible dimensions.
             # Owner filtering happens in SQL; other users' chunk content never enters the application.
             # Cosine distance < 1 keeps positive matches, matching the local retrieval contract.
-            return connection.execute(
+            matches = connection.execute(
                 "WITH matches AS ("
                 "SELECT d.public_id::text AS document_id, c.chunk_index, c.page_number, "
-                "c.content AS text, c.processing_status AS status, c.id AS chunk_id, "
+                "c.content AS text, c.processing_status AS status, c.id AS chunk_id, d.filename, d.metadata AS document_metadata, "
                 "CASE WHEN vector_dims(e.vector) = %s THEN e.vector <=> %s::vector END AS distance "
                 "FROM embedding e JOIN chunk c ON c.id = e.chunk_id "
                 "JOIN document d ON d.id = c.doc_id "
                 "WHERE d.user_id = %s AND d.public_id IS NOT NULL AND e.model = %s) "
-                "SELECT document_id, chunk_index, page_number, text, status, "
+                "SELECT document_id, filename, chunk_index, page_number, text, status, document_metadata, "
                 "LEAST(1.0, 1.0 - distance) AS similarity FROM matches "
                 "WHERE distance < 1.0 ORDER BY distance, chunk_id LIMIT %s",
                 (EMBEDDING_DIMENSIONS, vector, user_id, EMBEDDING_MODEL, limit),
             ).fetchall()
+        for chunk in matches:
+            metadata = chunk.pop('document_metadata', {})
+            chunk.update(source_line_range(chunk, metadata))
+        return matches
 
     def get_system_prompt(self, user_id: str) -> str:
         with self._connection() as connection:
@@ -207,7 +212,7 @@ class PostgresRepository:
         with self._connection() as connection:
             session_id = self._owned_conversation(connection, user_id, conversation_id)
             turns = connection.execute(
-                "SELECT id::text AS id, prompt, reply, status, created_at, completed_at "
+                "SELECT id::text AS id, prompt, reply, status, created_at, completed_at, retrieval_match_percent, sources "
                 "FROM chat_turn WHERE session_id = %s ORDER BY ordinal", (session_id,),
             ).fetchall()
             return messages_from_turns(turns)
@@ -244,13 +249,19 @@ class PostgresRepository:
             ).fetchone()['domain']
             return {**turn, 'history': list(reversed(history)), 'domain': domain}
 
-    def finish_turn(self, user_id: str, conversation_id: str, turn_id: str, reply: str | None) -> None:
+    def finish_turn(self, user_id: str, conversation_id: str, turn_id: str, reply: str | None,
+                    *, retrieval_match_percent: int | None = None, sources: list[dict[str, Any]] | None = None) -> None:
+        from psycopg.types.json import Jsonb
+
         with self._connection() as connection:
             session_id = self._owned_conversation(connection, user_id, conversation_id)
             result = connection.execute(
-                "UPDATE chat_turn SET reply = %s, status = %s, completed_at = CURRENT_TIMESTAMP "
+                "UPDATE chat_turn SET reply = %s, status = %s, completed_at = CURRENT_TIMESTAMP, "
+                "retrieval_match_percent = %s, sources = %s "
                 "WHERE session_id = %s AND id::text = %s AND status = 'pending' RETURNING id, prompt",
-                (reply, 'completed' if reply is not None else 'failed', session_id, turn_id),
+                (reply, 'completed' if reply is not None else 'failed',
+                 retrieval_match_percent if reply is not None else None,
+                 Jsonb((sources or []) if reply is not None else []), session_id, turn_id),
             ).fetchone()
             if result is None:
                 raise ConversationBusy()
@@ -339,7 +350,7 @@ class PostgresRepository:
             if conversation is None:
                 raise ResourceNotFound()
             turns = connection.execute(
-                "SELECT id::text AS id, prompt, reply, status, created_at, completed_at "
+                "SELECT id::text AS id, prompt, reply, status, created_at, completed_at, retrieval_match_percent, sources "
                 "FROM chat_turn WHERE session_id = %s ORDER BY ordinal", (conversation.pop('session_id'),),
             ).fetchall()
             return {'conversation': conversation, 'messages': messages_from_turns(turns)}

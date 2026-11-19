@@ -27,5 +27,7 @@ def messages_from_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
                          "content": turn["prompt"], "created_at": turn["created_at"]})
         if turn["status"] == "completed":
             messages.append({**base, "id": turn["id"] + ":assistant", "role": "assistant",
-                             "content": turn["reply"], "created_at": turn["completed_at"]})
+                             "content": turn["reply"], "created_at": turn["completed_at"],
+                             "retrieval_match_percent": turn.get("retrieval_match_percent"),
+                             "sources": turn.get("sources", [])})
     return messages

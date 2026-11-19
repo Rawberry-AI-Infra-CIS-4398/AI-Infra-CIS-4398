@@ -203,7 +203,7 @@ def test_stream_events_and_persisted_history(client):
     assert [e['status'] for e in events] == ['received', 'generating', 'completed']
     assert len({e['request_id'] for e in events}) == 1
     assert events[-1]['response']['reply'] == 'You said: hello'
-    assert set(events[-1]['response']) == {'conversation_id', 'turn_id', 'reply'}
+    assert set(events[-1]['response']) == {'conversation_id', 'turn_id', 'reply', 'retrieval_match_percent', 'sources'}
     assert len(client.get('/conversations/' + identifier + '/messages').json()) == 2
 
 
@@ -381,7 +381,7 @@ def test_document_upload_is_the_only_source_entry_point(client):
     response = ask(client, identifier, 'gamma')
     assert response.status_code == 200
     assert 'gamma uploaded document' in response.json()['reply']
-    assert set(response.json()) == {'conversation_id', 'turn_id', 'reply'}
+    assert set(response.json()) == {'conversation_id', 'turn_id', 'reply', 'retrieval_match_percent', 'sources'}
     history = client.get('/conversations/' + identifier + '/messages').json()
     assert len(history) == 2
 

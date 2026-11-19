@@ -68,7 +68,7 @@ def test_upload_schema_marks_array_items_as_binary_files():
     assert files["items"]["format"] == "binary"
 
 
-@pytest.mark.parametrize('missing_version', [None, 'baseline_001'])
+@pytest.mark.parametrize('missing_version', [None, 'baseline_001', 'retrieval_metadata_002'])
 def test_readiness_requires_baseline_schema(missing_version):
     from contextlib import contextmanager
     from unittest.mock import MagicMock
@@ -94,4 +94,4 @@ def test_readiness_requires_baseline_schema(missing_version):
             repository.check_ready()
     else:
         repository.check_ready()
-        assert connection.execute.call_count == 1
+        assert connection.execute.call_count == 2

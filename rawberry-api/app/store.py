@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from app.conversation import CONVERSATION_TTL_SECONDS, TURN_TIMEOUT_SECONDS, describe_exchange, messages_from_turns
 from app.repository import ConversationBusy, ResourceNotFound
-from app.retrieval.chunk_search import search_owned_chunks
+from app.retrieval.chunk_search import search_owned_chunks, source_line_range
 
 
 class InMemoryStore:
@@ -50,7 +50,13 @@ class InMemoryStore:
             return deepcopy([c for c in self._chunks if c['document_id'] in document_ids])
 
     def search_chunks(self, user_id: str, query: str, limit: int = 3) -> list[dict[str, Any]]:
-        return search_owned_chunks(user_id, self.list_chunks(user_id), query, limit)
+        with self._lock:
+            documents = {doc['id']: doc for doc in self.list_documents(user_id)}
+            chunks = [{**chunk, 'filename': documents[chunk['document_id']]['filename']}
+                      for chunk in self.list_chunks(user_id)]
+        matches = search_owned_chunks(user_id, chunks, query, limit)
+        return [{**chunk, **source_line_range(chunk, documents[chunk['document_id']].get('metadata', {}))}
+                for chunk in matches]
 
     def get_system_prompt(self, user_id: str) -> str:
         with self._lock:
@@ -106,7 +112,8 @@ class InMemoryStore:
             conversation['updated_at'] = now
             return {**deepcopy(turn), 'history': history, 'domain': conversation['domain']}
 
-    def finish_turn(self, user_id: str, conversation_id: str, turn_id: str, reply: str | None) -> None:
+    def finish_turn(self, user_id: str, conversation_id: str, turn_id: str, reply: str | None,
+                    *, retrieval_match_percent: int | None = None, sources: list[dict[str, Any]] | None = None) -> None:
         with self._lock:
             conversation = self._owned_conversation(user_id, conversation_id)
             turn = next((t for t in self._turns[conversation_id] if t['id'] == turn_id), None)
@@ -115,7 +122,9 @@ class InMemoryStore:
             if turn['status'] != 'pending':
                 raise ConversationBusy()
             now = self._now()
-            turn.update(status='completed' if reply is not None else 'failed', reply=reply, completed_at=now)
+            turn.update(status='completed' if reply is not None else 'failed', reply=reply, completed_at=now,
+                        retrieval_match_percent=retrieval_match_percent if reply is not None else None,
+                        sources=deepcopy(sources or []) if reply is not None else [])
             if reply is not None and conversation['description'] is None:
                 conversation['description'] = describe_exchange(turn['prompt'], reply)
             conversation['updated_at'] = now

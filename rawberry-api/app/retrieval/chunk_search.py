@@ -22,3 +22,12 @@ def search_owned_chunks(
                           embeddings.embed_document(chunk['text']), owner_id=user_id)
     results = RetrievalService(embeddings, repository).retrieve(query, limit, owner_id=user_id)
     return [{**chunks[result.chunk_id], 'similarity': result.similarity} for result in results]
+
+
+def source_line_range(chunk: dict[str, Any], metadata: dict[str, Any]) -> dict[str, int | None]:
+    """Use the saved extraction map; never guess locations for legacy documents."""
+    for location in metadata.get('cleaning', {}).get('chunk_source_map', []):
+        if (location['chunk_index'] == chunk['chunk_index']
+                and location.get('page_number') == chunk.get('page_number')):
+            return {key: location.get(key) for key in ('source_start_line', 'source_end_line')}
+    return {'source_start_line': None, 'source_end_line': None}
