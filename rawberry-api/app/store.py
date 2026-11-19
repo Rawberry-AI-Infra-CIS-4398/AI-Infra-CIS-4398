@@ -82,6 +82,13 @@ class InMemoryStore:
             return deepcopy([c for c in self._conversations.values() if c['user_id'] == user_id
                              and (self._now() - c['updated_at']).total_seconds() < CONVERSATION_TTL_SECONDS])
 
+    def delete_conversation(self, user_id: str, conversation_id: str) -> None:
+        with self._lock:
+            self._owned_conversation(user_id, conversation_id)
+            del self._conversations[conversation_id]
+            self._turns.pop(conversation_id, None)
+            self._shares.pop(conversation_id, None)
+
     def _owned_conversation(self, user_id: str, conversation_id: str) -> dict[str, Any]:
         conversation = self._conversations.get(conversation_id)
         if (conversation is None or conversation['user_id'] != user_id

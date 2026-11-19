@@ -69,6 +69,7 @@ reject extra fields; identity belongs in the header, not the body.
 | `PUT /me/system-prompt` | Set or clear the current user's response preferences. |
 | `POST /conversations` | Create a conversation with a fixed medical or education domain. |
 | `GET /conversations` | List the current user's non-expired conversations. |
+| `DELETE /conversations/{conversation_id}` | Permanently delete an owned conversation, its messages, and sharing access. |
 | `GET /conversations/{conversation_id}/messages` | Read the owner's saved conversation messages. |
 | `POST /chat` | Stream progress updates and Gemini answer chunks over SSE, then save the completed exchange. |
 | `PUT /conversations/{conversation_id}/shares` | Replace the users granted read-only access to an owned conversation. |
@@ -129,6 +130,8 @@ ordered messages with role, content, turn ID, status, and timestamp.
 
 - `GET /conversations` lists the user's conversations, including titles and descriptions.
 - `GET /conversations/{conversation_id}/messages` returns an owned conversation's messages.
+- `DELETE /conversations/{conversation_id}` requires the owner's `X-User-ID` header and returns **204 with no body**. Missing, expired, already deleted, or another user's conversations return 404. No JSON body is required.
+- Deletion removes saved turns, messages/citations, and sharing access; uploaded documents and response preferences remain. A pending generation cannot restore a deleted conversation.
 - The first successful exchange supplies a short description; the title remains caller-supplied.
 - Conversations expire after **24 hours of inactivity**. Reading history does not extend this period.
 - Only one generation may run per conversation. Concurrent requests return 409; abandoned pending turns can recover after five minutes.
