@@ -8,6 +8,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover
     genai = None
 
+
+class GeminiConfigurationError(RuntimeError):
+    """Real chat was requested without the configuration it requires."""
+
+
 class MockChatClient:
     def generate_reply(self, message: str, *, system_instruction: str | None = None) -> str:
         # Accept the same configuration as Gemini; echo content without simulating preferences.
@@ -27,24 +32,26 @@ class GeminiChatClient:
     def __init__(self, settings: Settings | None = None) -> None:
         # Store the settings used by the Gemini client.
         self.settings = settings or get_settings()
+        if not self.settings.use_mock_chat and not self._get_project_id():
+            raise GeminiConfigurationError(
+                'USE_MOCK_CHAT=false requires a Google Cloud project. Set GOOGLE_CLOUD_PROJECT '
+                '(or GCLOUD_PROJECT / GOOGLE_CLOUD_PROJECT_ID), or explicitly enable '
+                'USE_MOCK_CHAT=true for local development.'
+            )
 
     def _get_project_id(self) -> str | None:
         # Find the Google Cloud project ID in settings or environment variables.
-        return (
-            self.settings.google_cloud_project
-            or os.getenv("GOOGLE_CLOUD_PROJECT")
-            or os.getenv("GCLOUD_PROJECT")
-            or os.getenv("GOOGLE_CLOUD_PROJECT_ID")
-        )
+        return next((value.strip() for value in (
+            self.settings.google_cloud_project, os.getenv("GOOGLE_CLOUD_PROJECT"),
+            os.getenv("GCLOUD_PROJECT"), os.getenv("GOOGLE_CLOUD_PROJECT_ID"),
+        ) if value and value.strip()), None)
 
     def should_use_real_client(self) -> bool:
-        # Check whether real Gemini calls are enabled and configured.
-        if self.settings.use_mock_chat:
-            return False
-        return bool(self._get_project_id())
+        # Only an explicit mock setting permits echo responses.
+        return not self.settings.use_mock_chat
 
     def generate_reply(self, message: str, *, system_instruction: str | None = None) -> str:
-        # Generate a Gemini response or use the configured mock fallback.
+        # Use mock responses only when mock mode is explicitly configured.
         if not self.should_use_real_client():
             return MockChatClient().generate_reply(message, system_instruction=system_instruction)
 
@@ -63,25 +70,20 @@ class GeminiChatClient:
             or "global"
         )
 
-        try:
-            client = genai.Client(
-                vertexai=True,
-                project=project,
-                location=location,
-            )
+        with genai.Client(
+            vertexai=True,
+            project=project,
+            location=location,
+        ) as client:
             response = client.models.generate_content(
                 model=self.settings.gemini_model,
                 contents=message,
                 config={"system_instruction": system_instruction} if system_instruction else None,
             )
             text = getattr(response, "text", None)
-            if text:
-                return text.strip() or MockChatClient().generate_reply(message)
-            return str(response).strip() or MockChatClient().generate_reply(message)
-        except Exception:
-            if self.settings.use_mock_chat:
-                return MockChatClient().generate_reply(message)
-            raise
+            if not isinstance(text, str) or not text.strip():
+                raise RuntimeError('Gemini returned no answer text.')
+            return text.strip()
 
     def stream_reply(self, message: str, *, system_instruction: str | None = None) -> Iterator[str]:
         """Forward provider text chunks as they arrive, preserving whitespace."""

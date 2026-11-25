@@ -30,7 +30,7 @@ Set environment variables before starting the API; `.env` files are not loaded a
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string. Without it, storage is in memory and disappears on restart; separate processes do not share data. |
 | `DEVELOPER_UPLOAD_API_KEY` | Secret required for shared corpus uploads. Developer uploads are disabled if unset. |
-| `USE_MOCK_CHAT` | Defaults to `true`. Set to `false` for real Gemini answers. |
+| `USE_MOCK_CHAT` | Defaults to `true`. Set to `false` for real Gemini answers; a missing Google Cloud project then prevents startup instead of falling back to mock chat. |
 | `GOOGLE_CLOUD_PROJECT` | Google Cloud project for Vertex AI. |
 | `GOOGLE_CLOUD_LOCATION` | Vertex AI location; defaults to `global`. |
 | `GEMINI_MODEL` | Chat model; defaults to `gemini-2.5-flash`. |

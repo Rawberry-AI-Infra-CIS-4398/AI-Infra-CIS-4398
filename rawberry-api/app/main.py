@@ -10,6 +10,7 @@ from app.api.routes import router
 from app.config import get_settings
 from app.repository import ConversationBusy, Repository, ResourceNotFound, StorageError
 from app.services.chat_service import GenerationError
+from app.services.gemini_service import GeminiChatClient
 from app.store import InMemoryStore
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,9 @@ def create_app(store: Repository | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        # Validate real-chat configuration before serving traffic. Construction
+        # performs no model calls and leaves explicit local mock mode available.
+        GeminiChatClient(get_settings())
         check_ready = getattr(app.state.store, "check_ready", None)
         if check_ready is not None:
             await asyncio.to_thread(check_ready)
