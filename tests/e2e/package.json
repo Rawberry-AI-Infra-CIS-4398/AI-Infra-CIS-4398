@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "playwright test"
+    "test": "playwright test",
+    "test:uploads": "node --test upload-client.test.mjs"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1"
