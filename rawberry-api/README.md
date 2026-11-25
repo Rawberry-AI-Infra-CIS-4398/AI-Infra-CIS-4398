@@ -154,6 +154,46 @@ The 201 response must contain one result per file, with its filename and documen
 Confirm all returned IDs appear in `GET /upload` with the same user and domain;
 personal uploads are not listed by `/uploadedu` or `/uploadmedical`.
 
+Swagger automatically splits large selections for `/upload`, `/uploadedu`, and
+`/uploadmedical` into sequential requests targeting **30 MiB or less**, including
+a multipart overhead allowance. This stays below Cloud Run's **32 MiB HTTP/1
+request limit**. Each file must still be at most **25 MiB**; the client checks
+the whole selection before sending anything. Files are never split into fragments.
+
+On success, Swagger combines the per-request results into one 201 response array.
+Each request is atomic, but the complete selection spans multiple transactions:
+if a later batch fails, earlier batches remain stored. The error response contains
+`uploaded` (completed results), `failed_files`, and `not_attempted_files` with
+zero-based selection indices and filenames. Retry only the remaining files.
+If `may_have_completed` is true, check `GET /upload` (or the matching corpus list)
+before retrying because the last batch's result is uncertain. Only explicit 413
+rejections of multi-file requests are split and retried automatically.
+
+Frontend teams can use the same helper, served at `/static/upload-client.js`:
+
+```html
+<script src="https://YOUR_API_HOST/static/upload-client.js"></script>
+```
+
+```javascript
+const uploadFetch = RAWBerryUploads.createUploadFetch();
+const body = new FormData();
+body.append('domain', 'education');
+for (const file of selectedFiles) body.append('files', file);
+const response = await uploadFetch('https://YOUR_API_HOST/upload', {
+  method: 'POST', headers: { 'X-User-ID': authenticatedUserId }, body,
+});
+const result = await response.json(); // Array on success; detailed error on failure.
+```
+
+Call through the authenticated upstream backend as required by your deployment;
+the helper does not authenticate user IDs or configure cross-origin access. Shared
+corpus uploads must keep developer credentials in trusted tooling. Raw curl/API
+requests are not automatically split: keep their combined size below the platform
+limit. Increasing the server's per-file limit does not bypass Cloud Run's limit.
+
+Client tests: `node --test tests/e2e/upload-client.test.mjs` from the repository root.
+
 For example, from a terminal with two local TXT files:
 
 ```powershell

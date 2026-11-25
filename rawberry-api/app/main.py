@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 from app.api.routes import router
 from app.config import get_settings
+from app.docs import register_docs
 from app.repository import ConversationBusy, Repository, ResourceNotFound, StorageError
 from app.services.chat_service import GenerationError
 from app.store import InMemoryStore
@@ -32,7 +33,8 @@ def create_app(store: Repository | None = None) -> FastAPI:
             await asyncio.to_thread(check_ready)
         yield
 
-    app = FastAPI(title="RAWBerry API Starter", lifespan=lifespan)
+    app = FastAPI(title="RAWBerry API Starter", lifespan=lifespan, docs_url=None)
+    register_docs(app)
     app.state.store = store
 
     @app.exception_handler(ResourceNotFound)
